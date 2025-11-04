@@ -74,12 +74,13 @@ class CameraThread(QtCore.QThread):
         # debounce state
         self.last_gesture = None
         self.same_count = 0
-        self.FRAMES_REQUIRED = 8  # number of consecutive frames for confirmation
+        self.FRAMES_REQUIRED = 8  # consecutive frames for confirmation
 
     def run(self):
         self.running = True
         cap = cv2.VideoCapture(self.camera_index)
         prev = 0
+
         while self.running:
             time_elapsed = time.time() - prev
             if time_elapsed < 1 / self.fps:
@@ -90,60 +91,69 @@ class CameraThread(QtCore.QThread):
             if not ret:
                 continue
 
-            # flip for mirror-like behavior
+            # mirror-like behavior
             frame = cv2.flip(frame, 1)
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
             results = self.hands.process(rgb)
 
             gesture = None
             annotated = frame.copy()
+
             if results.multi_hand_landmarks:
                 hand = results.multi_hand_landmarks[0]
                 mp.solutions.drawing_utils.draw_landmarks(
-                    annotated, hand, mp.solutions.hands.HAND_CONNECTIONS)
+                    annotated, hand, mp.solutions.hands.HAND_CONNECTIONS
+                )
 
-                # convert landmarks into a simple list of (x,y) normalized
-                lm = [(lm.x, lm.y) for lm in hand.landmark]
+                # normalized landmarks
+                lm = [(l.x, l.y) for l in hand.landmark]
 
-                # simple heuristics:
-                # fingertip indices
-                tip_ids = {"thumb":4, "index":8, "middle":12, "ring":16, "pinky":20}
-                pip_ids = {"index":6, "middle":10, "ring":14, "pinky":18}
+                # fingertip and pip indices
+                tip_ids = {"thumb": 4, "index": 8, "middle": 12, "ring": 16, "pinky": 20}
+                pip_ids = {"index": 6, "middle": 10, "ring": 14, "pinky": 18}
 
-                # function to check if a finger is extended (tip y < pip y -> extended) — assumes palm vertical
-                def is_extended(finger):
-                    if finger == "thumb":
-                        # thumb extension check: compare x positions relative to MCP(2)
-                        # this is heuristic and works for mostly front-facing camera
-                        return lm[4][0] < lm[3][0]  # thumb tip x left of ip -> extended (mirror)
-                    else:
-                        tip = tip_ids[finger]
-                        pip = pip_ids[finger]
-                        return lm[tip][1] < lm[pip][1]  # tip above pip => extended
+                # check non-thumb finger extended (strict)
+                def is_finger_extended(finger):
+                    tip = tip_ids[finger]
+                    pip = pip_ids[finger]
+                    return lm[tip][1] < lm[pip][1]  # tip above pip
 
-                idx_ext = is_extended("index")
-                mid_ext = is_extended("middle")
-                ring_ext = is_extended("ring")
-                pinky_ext = is_extended("pinky")
-                thumb_ext = is_extended("thumb")
+                # thumb vertical for thumbs up
+                def is_thumb_up():
+                    return lm[4][1] < lm[3][1]  # tip above IP joint
 
-                # THUMBS UP: thumb extended and other fingers folded
-                if thumb_ext and not (idx_ext or mid_ext or ring_ext or pinky_ext):
+                # thumb relaxed for open palm
+                def is_thumb_open_palm():
+                    return lm[4][0] - lm[2][0] > -0.05  # allow outward angle
+
+                # check fingers
+                idx_ext = is_finger_extended("index")
+                mid_ext = is_finger_extended("middle")
+                ring_ext = is_finger_extended("ring")
+                pinky_ext = is_finger_extended("pinky")
+                thumb_up = is_thumb_up()
+                thumb_open = is_thumb_open_palm()
+
+                # --- Gesture detection ---
+                # 1) Thumbs Up
+                if thumb_up and not (idx_ext or mid_ext or ring_ext or pinky_ext):
                     gesture = "thumbs_up"
-                    cv2.putText(annotated, "Thumbs Up", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,0), 2)
+                    cv2.putText(annotated, "Thumbs Up", (10,30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,0), 2)
 
-                # OPEN PALM: all fingers extended
-                elif thumb_ext and idx_ext and mid_ext and ring_ext and pinky_ext:
+                # 2) Open Palm
+                elif thumb_open and all([idx_ext, mid_ext, ring_ext, pinky_ext]):
                     gesture = "open_palm"
-                    cv2.putText(annotated, "Open Palm", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,255), 2)
+                    cv2.putText(annotated, "Open Palm", (10,30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,255), 2)
 
-                # POINT: index extended, others folded
+                # 3) Point
                 elif idx_ext and not (mid_ext or ring_ext or pinky_ext):
                     gesture = "point"
-                    cv2.putText(annotated, "Pointing", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255,255,0), 2)
+                    cv2.putText(annotated, "Pointing", (10,30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255,255,0), 2)
 
-            # debounce / require consecutive frames
+            # --- Debounce ---
             if gesture == self.last_gesture and gesture is not None:
                 self.same_count += 1
             else:
@@ -151,16 +161,15 @@ class CameraThread(QtCore.QThread):
                 self.last_gesture = gesture
 
             if gesture and self.same_count >= self.FRAMES_REQUIRED:
-                # confirmed
                 self.gesture_detected.emit(gesture)
-                # reset so we don't fire continuously
                 self.last_gesture = None
                 self.same_count = 0
 
-            # convert annotated frame to QImage
+            # --- Convert frame to QImage ---
             h, w, ch = annotated.shape
             bytes_per_line = ch * w
-            qimg = QtGui.QImage(annotated.data, w, h, bytes_per_line, QtGui.QImage.Format.Format_BGR888)
+            qimg = QtGui.QImage(annotated.data, w, h, bytes_per_line,
+                                QtGui.QImage.Format.Format_BGR888)
             self.frame_ready.emit(qimg)
 
         cap.release()
@@ -169,6 +178,7 @@ class CameraThread(QtCore.QThread):
     def stop(self):
         self.running = False
         self.wait()
+
 
 # ---------- Main Application ----------
 class MainWindow(QtWidgets.QMainWindow):
