@@ -11,7 +11,7 @@ Minimum Viable Product includes:
 Gestures:
     - Open Palm: Cancel order
     - Point right: Next order
-    - Point Left: Previous Order
+    - Peace sign: Previous Order
     - Thumbs Up: Mark order as completed
 
 UI: 
@@ -25,12 +25,14 @@ Key Features
    - 👍 Thumbs Up: Mark the selected order as completed
    - ✋ Open Palm: Cancel the selected order
    - 👉 Point: Move to the next order
+   - peace sign: move to the previous order
 
 2. **UI Features:**
    - Real-time video feed with hand landmarks overlay
    - Orders list with current selection highlighted
    - Status label showing detected gestures and actions
    - Optional buttons for manual order control
+   - API endpoint for mobile web app POST request
 
 3. **Debounce Mechanism:**
    - Gestures are confirmed only after being detected consistently for 8 frames to avoid flickering.
