@@ -111,19 +111,26 @@ class CameraThread(QtCore.QThread):
                 tip_ids = {"thumb":4, "index":8, "middle":12, "ring":16, "pinky":20}
                 pip_ids = {"index":6, "middle":10, "ring":14, "pinky":18}
 
-                def is_extended(finger):
+                def is_finger_extended(finger, lm, tolerance=0.03):
+                    tip_ids = {"thumb":4, "index":8, "middle":12, "ring":16, "pinky":20}
+                    pip_ids = {"index":6, "middle":10, "ring":14, "pinky":18}
+
                     if finger == "thumb":
-                        return lm[4][0] - lm[2][0] > 0.05  # relaxed for open palm
+                        # relaxed thumb check, works even if thumb angled or close to palm
+                        return (lm[4][0] - lm[2][0]) > -0.02
                     else:
                         tip = tip_ids[finger]
                         pip = pip_ids[finger]
-                        return lm[tip][1] < lm[pip][1]  # tip above pip -> extended
+                        # tip above pip, small tolerance allows straight/stacked fingers
+                        return lm[tip][1] < lm[pip][1] + tolerance
 
-                idx_ext = is_extended("index")
-                mid_ext = is_extended("middle")
-                ring_ext = is_extended("ring")
-                pinky_ext = is_extended("pinky")
-                thumb_ext = is_extended("thumb")
+
+                idx_ext = is_finger_extended("index", lm)
+                mid_ext = is_finger_extended("middle", lm)
+                ring_ext = is_finger_extended("ring", lm)
+                pinky_ext = is_finger_extended("pinky", lm)
+                thumb_ext = is_finger_extended("thumb", lm)
+
 
                 # -------------------------
                 # GESTURE DETECTION
@@ -135,21 +142,13 @@ class CameraThread(QtCore.QThread):
                     cv2.putText(annotated, "Thumbs Up", (10,30),
                                 cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,0), 2)
 
-                # 2) Open Palm: all fingers extended, allow finger spread
+                # Open Palm: all fingers extended, finger spread doesn't matter
                 elif all([thumb_ext, idx_ext, mid_ext, ring_ext, pinky_ext]):
-                    # check max distance between adjacent fingers
-                    max_dist = max(
-                        self.distance(lm[4], lm[8]),
-                        self.distance(lm[8], lm[12]),
-                        self.distance(lm[12], lm[16]),
-                        self.distance(lm[16], lm[20])
-                    )
-                    if max_dist < 0.45:  # tweak based on camera
-                        gesture_candidate = "open_palm"
-                        cv2.putText(annotated, "Open Palm", (10,30),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,255), 2)
-                    else:
-                        gesture_candidate = None
+                    gesture_candidate = "open_palm"
+                    cv2.putText(annotated, "Open Palm", (10,30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,255), 2)
+
+
 
                 # 3) Point: index extended, other fingers folded
                 elif idx_ext and not (mid_ext or ring_ext or pinky_ext):
