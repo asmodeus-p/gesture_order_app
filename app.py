@@ -1,14 +1,48 @@
+# app.py
 import sys
 import sqlite3
 import time
+import wave
+import os
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import cv2
 import mediapipe as mp
 from PyQt6 import QtCore, QtGui, QtWidgets
+from PyQt6.QtMultimedia import QSoundEffect
+from PyQt6.QtCore import QUrl
 
 DB_PATH = "orders.db"
+SOUNDS_DIR = Path("sounds")
+SOUND_FILES = {
+    "thumbs_up": SOUNDS_DIR / "confirm.wav",
+    "open_palm": SOUNDS_DIR / "cancel.wav",
+    "point": SOUNDS_DIR / "navigate.wav",
+}
+
+# ---------- Utility: generate simple beep WAVs if missing ----------
+def ensure_sounds():
+    SOUNDS_DIR.mkdir(exist_ok=True)
+    # Tone settings per action: (freq_hz, duration_s)
+    tones = {
+        "thumbs_up": (880, 0.10),   # high beep
+        "open_palm": (440, 0.12),   # low beep
+        "point": (660, 0.08),       # mid beep
+    }
+    framerate = 44100
+    for name, (freq, dur) in tones.items():
+        path = SOUND_FILES[name]
+        if not path.exists():
+            samples = np.sin(2 * np.pi * np.arange(int(framerate * dur)) * freq / framerate)
+            # amplitude -> int16
+            samples = (samples * 0.5 * (2**15 - 1)).astype(np.int16)
+            with wave.open(str(path), 'wb') as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)  # 2 bytes for int16
+                wf.setframerate(framerate)
+                wf.writeframes(samples.tobytes())
 
 # ---------- SQLite Helpers ----------
 def init_db(path=DB_PATH):
@@ -43,6 +77,14 @@ def load_orders(path=DB_PATH):
     conn.close()
     return rows
 
+def get_order_status(order_id, path=DB_PATH):
+    conn = sqlite3.connect(path)
+    c = conn.cursor()
+    c.execute("SELECT status FROM orders WHERE id = ?", (order_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
 def update_order_status(order_id, new_status, path=DB_PATH):
     conn = sqlite3.connect(path)
     c = conn.cursor()
@@ -50,7 +92,7 @@ def update_order_status(order_id, new_status, path=DB_PATH):
     conn.commit()
     conn.close()
 
-# ---------- Gesture detection thread ----------
+# ---------- Gesture detection thread (restored interface) ----------
 class CameraThread(QtCore.QThread):
     frame_ready = QtCore.pyqtSignal(QtGui.QImage)
     gesture_detected = QtCore.pyqtSignal(str)
@@ -80,7 +122,6 @@ class CameraThread(QtCore.QThread):
         self.running = True
         cap = cv2.VideoCapture(self.camera_index)
         prev = 0
-
         while self.running:
             time_elapsed = time.time() - prev
             if time_elapsed < 1 / self.fps:
@@ -186,6 +227,17 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle("Gesture Order Manager (PyQt6)")
         self.resize(1000, 700)
+
+        # ensure sounds exist
+        ensure_sounds()
+
+        # set up sound effects (loaded once)
+        self.sounds = {}
+        for k, p in SOUND_FILES.items():
+            se = QSoundEffect()
+            se.setSource(QUrl.fromLocalFile(str(p)))
+            se.setVolume(0.5)  # default
+            self.sounds[k] = se
 
         # central widget
         main = QtWidgets.QWidget()
@@ -298,21 +350,40 @@ class MainWindow(QtWidgets.QMainWindow):
         if not order_id:
             self.status_label.setText("Status: No order selected")
             return
+
+        # determine prior state so we only play sound when an actual change occurs
+        prior_status = get_order_status(order_id)
+
+        action_changed = False
+
         if gesture == "thumbs_up":
-            update_order_status(order_id, "completed")
-            self.status_label.setText(f"Status: Order {order_id} completed")
+            if prior_status != "completed":
+                update_order_status(order_id, "completed")
+                self.status_label.setText(f"Status: Order {order_id} completed")
+                action_changed = True
         elif gesture == "open_palm":
-            update_order_status(order_id, "canceled")
-            self.status_label.setText(f"Status: Order {order_id} canceled")
+            if prior_status != "canceled":
+                update_order_status(order_id, "canceled")
+                self.status_label.setText(f"Status: Order {order_id} canceled")
+                action_changed = True
         elif gesture == "point":
             # next row
             row = self.order_list.currentRow()
             if row < self.order_list.count() - 1:
                 self.order_list.setCurrentRow(row + 1)
                 self.status_label.setText("Status: Moved to next order")
+                action_changed = True
             else:
                 self.status_label.setText("Status: Already at last order")
-        self.reload_orders()
+
+        # reload while preserving selection (so selection doesn't jump)
+        self.reload_orders(preserve_selection=True)
+
+        # play sound only if action changed state (Q1/Q2 = B)
+        if action_changed:
+            if gesture in self.sounds:
+                self.sounds[gesture].stop()
+                self.sounds[gesture].play()
 
     # slot from camera thread when a gesture is confirmed
     @QtCore.pyqtSlot(str)
