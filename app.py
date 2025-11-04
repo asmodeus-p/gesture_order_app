@@ -14,12 +14,25 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtMultimedia import QSoundEffect
 from PyQt6.QtCore import QUrl
 
-DB_PATH = "orders.db"
+import threading
+import uvicorn
+from api.server import api_app
+
+# Start FastAPI in the background
+def run_api():
+    uvicorn.run(api_app, host="0.0.0.0", port=8000)
+
+threading.Thread(target=run_api, daemon=True).start()
+
+
+
+DB_PATH = Path("../orders.db")
 SOUNDS_DIR = Path("sounds")
 SOUND_FILES = {
     "thumbs_up": SOUNDS_DIR / "confirm.wav",
     "open_palm": SOUNDS_DIR / "cancel.wav",
     "point": SOUNDS_DIR / "navigate.wav",
+    "prev": SOUNDS_DIR / "navigate.wav",
 }
 
 # ---------- Utility: generate simple beep WAVs if missing ----------
@@ -30,6 +43,7 @@ def ensure_sounds():
         "thumbs_up": (880, 0.10),   # high beep
         "open_palm": (440, 0.12),   # low beep
         "point": (660, 0.08),       # mid beep
+        "prev": (660, 0.08),        # mid beep
     }
     framerate = 44100
     for name, (freq, dur) in tones.items():
@@ -193,6 +207,12 @@ class CameraThread(QtCore.QThread):
                     gesture = "point"
                     cv2.putText(annotated, "Pointing", (10,30),
                                 cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255,255,0), 2)
+                    
+                # 4) Peace Sign (Previous Order)
+                elif idx_ext and mid_ext and not (ring_ext or pinky_ext):
+                    gesture = "prev"
+                    cv2.putText(annotated, "Peace Sign", (10,30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (200,200,0), 2)
 
             # --- Debounce ---
             if gesture == self.last_gesture and gesture is not None:
@@ -256,13 +276,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # fallback buttons
         btn_layout = QtWidgets.QHBoxLayout()
+        self.btn_prev = QtWidgets.QPushButton("Previous (✌️)")
         self.btn_complete = QtWidgets.QPushButton("Complete (👍)")
         self.btn_cancel = QtWidgets.QPushButton("Cancel (✋)")
         self.btn_next = QtWidgets.QPushButton("Next (👉)")
+        btn_layout.addWidget(self.btn_prev)
         btn_layout.addWidget(self.btn_complete)
         btn_layout.addWidget(self.btn_cancel)
         btn_layout.addWidget(self.btn_next)
         left.addLayout(btn_layout)
+
 
         # right: orders list
         right = QtWidgets.QVBoxLayout()
@@ -282,6 +305,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_complete.clicked.connect(lambda: self.handle_action("thumbs_up"))
         self.btn_cancel.clicked.connect(lambda: self.handle_action("open_palm"))
         self.btn_next.clicked.connect(lambda: self.handle_action("point"))
+        self.btn_prev.clicked.connect(lambda: self.handle_action("prev"))
+
 
         # keyboard shortcuts
         QtGui.QShortcut(QtGui.QKeySequence("Space"), self, activated=lambda: self.handle_action("thumbs_up"))
@@ -297,6 +322,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # load DB
         init_db()
         self.reload_orders()
+
+        self.poll_timer = QtCore.QTimer()
+        self.poll_timer.timeout.connect(lambda: self.reload_orders(preserve_selection=True))
+        self.poll_timer.start(3000) 
 
     def closeEvent(self, event):
         if hasattr(self, "cam_thread") and self.cam_thread.isRunning():
@@ -375,6 +404,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 action_changed = True
             else:
                 self.status_label.setText("Status: Already at last order")
+        
+        elif gesture == "prev":
+            row = self.order_list.currentRow()
+            if row > 0:
+                self.order_list.setCurrentRow(row - 1)
+                self.status_label.setText("Status: Moved to previous order")
+                action_changed = True
+            else:
+                self.status_label.setText("Status: Already at first order")
+
 
         # reload while preserving selection (so selection doesn't jump)
         self.reload_orders(preserve_selection=True)
