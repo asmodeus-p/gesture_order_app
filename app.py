@@ -116,7 +116,7 @@ class CameraThread(QtCore.QThread):
         # debounce state
         self.last_gesture = None
         self.same_count = 0
-        self.FRAMES_REQUIRED = 8  # consecutive frames for confirmation
+        self.FRAMES_REQUIRED = 12  # consecutive frames for confirmation
 
     def run(self):
         self.running = True
