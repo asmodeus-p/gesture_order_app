@@ -83,11 +83,24 @@ def init_db(path=DB_PATH):
         conn.commit()
     conn.close()
 
-def load_orders(path=DB_PATH):
-    conn = sqlite3.connect(path)
-    c = conn.cursor()
-    c.execute("SELECT id, order_number, status FROM orders ORDER BY id")
-    rows = c.fetchall()
+def load_orders():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    # Support both old and new schemas
+    try:
+        cur.execute("""
+            SELECT id, order_number, items, quantity, total, status
+            FROM orders
+            ORDER BY id DESC
+        """)
+    except sqlite3.OperationalError:
+        # fallback for older DBs with only 3 columns
+        cur.execute("""
+            SELECT id, order_number, status
+            FROM orders
+            ORDER BY id DESC
+        """)
+    rows = cur.fetchall()
     conn.close()
     return rows
 
@@ -105,6 +118,30 @@ def update_order_status(order_id, new_status, path=DB_PATH):
     c.execute("UPDATE orders SET status = ? WHERE id = ?", (new_status, order_id))
     conn.commit()
     conn.close()
+
+def get_order_by_id(order_id):
+    """
+    Returns a dictionary for the given order_id with keys:
+    number, items, qty, total, status
+    """
+    rows = load_orders()  # returns list of tuples
+    for row in rows:
+        if row[0] == order_id:
+            # safe unpacking
+            number = row[1] if len(row) > 1 else "-"
+            items = row[2] if len(row) > 2 else "-"
+            qty = row[3] if len(row) > 3 else "-"
+            total = row[4] if len(row) > 4 else 0.0
+            status = row[5] if len(row) > 5 else "pending"
+            return {
+                "number": number,
+                "items": items,
+                "qty": qty,
+                "total": total,
+                "status": status
+            }
+    return None
+
 
 # ---------- Gesture detection thread (restored interface) ----------
 import cv2
@@ -273,25 +310,24 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Gesture Order Manager (PyQt6)")
-        self.resize(1000, 700)
+        self.resize(1100, 700)
 
-        # ensure sounds exist
         ensure_sounds()
 
-        # set up sound effects (loaded once)
+        # Load sound effects
         self.sounds = {}
         for k, p in SOUND_FILES.items():
             se = QSoundEffect()
             se.setSource(QUrl.fromLocalFile(str(p)))
-            se.setVolume(0.5)  # default
+            se.setVolume(0.5)
             self.sounds[k] = se
 
-        # central widget
+        # Central widget
         main = QtWidgets.QWidget()
         self.setCentralWidget(main)
         layout = QtWidgets.QHBoxLayout(main)
 
-        # left: video
+        # ===== Left: Video + Gesture Buttons =====
         left = QtWidgets.QVBoxLayout()
         self.video_label = QtWidgets.QLabel()
         self.video_label.setFixedSize(640, 480)
@@ -301,7 +337,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_label = QtWidgets.QLabel("Status: Ready")
         left.addWidget(self.status_label)
 
-        # fallback buttons
+        # Gesture buttons
         btn_layout = QtWidgets.QHBoxLayout()
         self.btn_prev = QtWidgets.QPushButton("Previous (✌️)")
         self.btn_complete = QtWidgets.QPushButton("Complete (👍)")
@@ -313,103 +349,173 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_layout.addWidget(self.btn_next)
         left.addLayout(btn_layout)
 
+        layout.addLayout(left)
 
-        # right: orders list
+        # ===== Right: Orders Card + Table =====
         right = QtWidgets.QVBoxLayout()
-        right.addWidget(QtWidgets.QLabel("<b>Orders</b>"))
-        self.order_list = QtWidgets.QListWidget()
-        self.order_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
-        right.addWidget(self.order_list)
 
-        # small legend
-        legend = QtWidgets.QLabel("Gestures:\n👍 Thumbs Up = Complete\n✋ Open Palm = Cancel\n👉 Point = Next order")
+        # --- Order Details Card ---
+        self.order_card = QtWidgets.QGroupBox("Order Details")
+        card_layout = QtWidgets.QFormLayout()
+        self.lbl_order_number = QtWidgets.QLabel("-")
+        self.lbl_order_items = QtWidgets.QLabel("-")
+        self.lbl_order_qty = QtWidgets.QLabel("-")
+        self.lbl_order_total = QtWidgets.QLabel("-")
+        self.lbl_order_status = QtWidgets.QLabel("-")
+        card_layout.addRow("Order #:", self.lbl_order_number)
+        card_layout.addRow("Items:", self.lbl_order_items)
+        card_layout.addRow("Qty:", self.lbl_order_qty)
+        card_layout.addRow("Total:", self.lbl_order_total)
+        card_layout.addRow("Status:", self.lbl_order_status)
+        self.order_card.setLayout(card_layout)
+        right.addWidget(self.order_card)
+
+        # --- Orders Table ---
+        right.addWidget(QtWidgets.QLabel("<b>All Orders</b>"))
+        self.order_table = QtWidgets.QTableWidget()
+        self.order_table.setColumnCount(2)
+        self.order_table.setHorizontalHeaderLabels(["Order ID", "Status"])
+        self.order_table.horizontalHeader().setSectionResizeMode(
+            QtWidgets.QHeaderView.ResizeMode.Stretch
+        )
+        self.order_table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.order_table.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self.order_table.setEditTriggers(QtWidgets.QTableWidget.EditTrigger.NoEditTriggers)
+        right.addWidget(self.order_table)
+
+        # Legend
+        legend = QtWidgets.QLabel(
+            "Gestures:\n👍 Thumbs Up = Complete\n✋ Open Palm = Cancel\n👉 Point = Next order\n✌️ Peace = Previous order"
+        )
         right.addWidget(legend)
 
-        layout.addLayout(left)
         layout.addLayout(right)
 
-        # wires
+        # ===== Signals =====
         self.btn_complete.clicked.connect(lambda: self.handle_action("thumbs_up"))
         self.btn_cancel.clicked.connect(lambda: self.handle_action("open_palm"))
         self.btn_next.clicked.connect(lambda: self.handle_action("point"))
         self.btn_prev.clicked.connect(lambda: self.handle_action("prev"))
 
-
-        # keyboard shortcuts
+        # Keyboard shortcuts
         QtGui.QShortcut(QtGui.QKeySequence("Space"), self, activated=lambda: self.handle_action("thumbs_up"))
         QtGui.QShortcut(QtGui.QKeySequence("N"), self, activated=lambda: self.handle_action("point"))
         QtGui.QShortcut(QtGui.QKeySequence("C"), self, activated=lambda: self.handle_action("open_palm"))
 
-        # camera thread
+        # Camera thread
         self.cam_thread = CameraThread()
         self.cam_thread.frame_ready.connect(self.update_frame)
         self.cam_thread.gesture_detected.connect(self.on_gesture)
         self.cam_thread.start()
 
-        # load DB
+        # Load DB
         init_db()
         self.reload_orders()
 
+        # Table selection signal
+        self.order_table.cellClicked.connect(self.on_order_selected)
+
+        # Poll timer for updates
         self.poll_timer = QtCore.QTimer()
         self.poll_timer.timeout.connect(lambda: self.reload_orders(preserve_selection=True))
-        self.poll_timer.start(3000) 
+        self.poll_timer.start(3000)
 
+    # ===== Helper Methods =====
     def closeEvent(self, event):
         if hasattr(self, "cam_thread") and self.cam_thread.isRunning():
             self.cam_thread.stop()
         event.accept()
 
     def update_frame(self, qimg):
-        # scale to label
-        pix = QtGui.QPixmap.fromImage(qimg).scaled(self.video_label.size(), QtCore.Qt.AspectRatioMode.KeepAspectRatio)
+        pix = QtGui.QPixmap.fromImage(qimg).scaled(
+            self.video_label.size(), QtCore.Qt.AspectRatioMode.KeepAspectRatio
+        )
         self.video_label.setPixmap(pix)
 
+    # ===== Order Reload =====
     def reload_orders(self, preserve_selection=True):
-        # remember currently selected order
+        # remember selected
         selected_id = None
         if preserve_selection:
-            item = self.order_list.currentItem()
-            if item:
-                selected_id = item.data(QtCore.Qt.ItemDataRole.UserRole)
+            sel = self.get_selected_order()
+            if sel:
+                selected_id = sel
 
-        self.order_list.clear()
-        rows = load_orders()
-        for r in rows:
-            id_, number, status = r
-            item = QtWidgets.QListWidgetItem(f"#{number} — {status}")
-            item.setData(QtCore.Qt.ItemDataRole.UserRole, id_)
-            # style based on status
+        self.order_table.setRowCount(0)
+        rows = load_orders()  # return list of tuples
+
+        for r, row in enumerate(rows):
+            # Safe unpacking
+            id_ = row[0] if len(row) > 0 else None
+            number = row[1] if len(row) > 1 else "-"
+            items = row[2] if len(row) > 2 else "-"
+            qty = row[3] if len(row) > 3 else "-"
+            total = row[4] if len(row) > 4 else 0.0
+            status = row[5] if len(row) > 5 else "pending"
+
+            self.order_table.insertRow(r)
+
+            item_number = QtWidgets.QTableWidgetItem(str(number))
+            item_number.setData(QtCore.Qt.ItemDataRole.UserRole, id_)
+            status_item = QtWidgets.QTableWidgetItem(status)
+
+            # Color by status
             if status == "completed":
-                item.setForeground(QtGui.QColor("green"))
+                status_item.setForeground(QtGui.QColor("green"))
             elif status == "canceled":
-                item.setForeground(QtGui.QColor("red"))
-            self.order_list.addItem(item)
+                status_item.setForeground(QtGui.QColor("red"))
+            else:
+                status_item.setForeground(QtGui.QColor("black"))
+
+            self.order_table.setItem(r, 0, item_number)
+            self.order_table.setItem(r, 1, status_item)
 
         # restore selection
-        if preserve_selection and selected_id is not None:
-            for i in range(self.order_list.count()):
-                if self.order_list.item(i).data(QtCore.Qt.ItemDataRole.UserRole) == selected_id:
-                    self.order_list.setCurrentRow(i)
+        if preserve_selection and selected_id:
+            for i in range(self.order_table.rowCount()):
+                item = self.order_table.item(i, 0)
+                if item and item.data(QtCore.Qt.ItemDataRole.UserRole) == selected_id:
+                    self.order_table.selectRow(i)
+                    self.on_order_selected(i, 0)
                     break
-        elif self.order_list.count() > 0:
-            self.order_list.setCurrentRow(0)
-
+        elif self.order_table.rowCount() > 0:
+            self.order_table.selectRow(0)
+            self.on_order_selected(0, 0)
 
     def get_selected_order(self):
-        item = self.order_list.currentItem()
+        row = self.order_table.currentRow()
+        if row < 0:
+            return None
+        item = self.order_table.item(row, 0)
         if not item:
             return None
         return item.data(QtCore.Qt.ItemDataRole.UserRole)
 
+    # ===== Update Order Details Card =====
+    def on_order_selected(self, row, column):
+        order_id = self.order_table.item(row, 0).data(QtCore.Qt.ItemDataRole.UserRole)
+        order = get_order_by_id(order_id)
+        if not order:
+            return
+
+        self.lbl_order_number.setText(str(order.get("number", "-")))
+        self.lbl_order_items.setText(str(order.get("items", "-")))
+        self.lbl_order_qty.setText(str(order.get("qty", "-")))
+        self.lbl_order_total.setText(f"{order.get('total', 0.0):.2f}")
+        self.lbl_order_status.setText(order.get("status", "-"))
+
+    # ===== Handle Gesture / Button Actions =====
     def handle_action(self, gesture):
         order_id = self.get_selected_order()
         if not order_id:
             self.status_label.setText("Status: No order selected")
             return
 
-        # determine prior state so we only play sound when an actual change occurs
         prior_status = get_order_status(order_id)
-
         action_changed = False
 
         if gesture == "thumbs_up":
@@ -423,42 +529,33 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.status_label.setText(f"Status: Order {order_id} canceled")
                 action_changed = True
         elif gesture == "point":
-            # next row
-            row = self.order_list.currentRow()
-            if row < self.order_list.count() - 1:
-                self.order_list.setCurrentRow(row + 1)
+            row = self.order_table.currentRow()
+            if row < self.order_table.rowCount() - 1:
+                self.order_table.selectRow(row + 1)
+                self.on_order_selected(row + 1, 0)
                 self.status_label.setText("Status: Moved to next order")
                 action_changed = True
-            else:
-                self.status_label.setText("Status: Already at last order")
-        
         elif gesture == "prev":
-            row = self.order_list.currentRow()
+            row = self.order_table.currentRow()
             if row > 0:
-                self.order_list.setCurrentRow(row - 1)
+                self.order_table.selectRow(row - 1)
+                self.on_order_selected(row - 1, 0)
                 self.status_label.setText("Status: Moved to previous order")
                 action_changed = True
-            else:
-                self.status_label.setText("Status: Already at first order")
 
-
-        # reload while preserving selection (so selection doesn't jump)
         self.reload_orders(preserve_selection=True)
 
-        # play sound only if action changed state (Q1/Q2 = B)
-        if action_changed:
-            if gesture in self.sounds:
-                self.sounds[gesture].stop()
-                self.sounds[gesture].play()
+        if action_changed and gesture in self.sounds:
+            self.sounds[gesture].stop()
+            self.sounds[gesture].play()
 
-    # slot from camera thread when a gesture is confirmed
+    # ===== Camera Gesture Slot =====
     @QtCore.pyqtSlot(str)
     def on_gesture(self, gesture):
-        # flash UI or change label to show gesture
         self.status_label.setText(f"Gesture detected: {gesture}")
         QtCore.QTimer.singleShot(1200, lambda: self.status_label.setText("Status: Ready"))
-        # map directly to action
         self.handle_action(gesture)
+
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
