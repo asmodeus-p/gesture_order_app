@@ -107,6 +107,12 @@ def update_order_status(order_id, new_status, path=DB_PATH):
     conn.close()
 
 # ---------- Gesture detection thread (restored interface) ----------
+import cv2
+import time
+import numpy as np
+from PyQt6 import QtCore, QtGui
+import mediapipe as mp
+
 class CameraThread(QtCore.QThread):
     frame_ready = QtCore.pyqtSignal(QtGui.QImage)
     gesture_detected = QtCore.pyqtSignal(str)
@@ -173,9 +179,30 @@ class CameraThread(QtCore.QThread):
                     pip = pip_ids[finger]
                     return lm[tip][1] < lm[pip][1]  # tip above pip
 
-                # thumb vertical for thumbs up
+                # improved thumb-up detection
                 def is_thumb_up():
-                    return lm[4][1] < lm[3][1]  # tip above IP joint
+                    wrist = np.array(lm[0])
+                    thumb_mcp = np.array(lm[2])
+                    thumb_ip = np.array(lm[3])
+                    thumb_tip = np.array(lm[4])
+                    pinky_tip = np.array(lm[20])   # pinky fingertip landmark
+
+                    # Distances between thumb joints
+                    dist_mcp_ip = np.linalg.norm(thumb_mcp - thumb_ip)
+                    dist_ip_tip = np.linalg.norm(thumb_ip - thumb_tip)
+                    dist_mcp_tip = np.linalg.norm(thumb_mcp - thumb_tip)
+
+                    # Check if thumb is straight (not curled)
+                    thumb_straight = dist_mcp_tip > 0.7 * (dist_mcp_ip + dist_ip_tip)
+
+                    # Check thumb upward direction
+                    thumb_upward = thumb_tip[1] < wrist[1] - 0.05
+
+                    # New check: thumb should NOT be close to pinky tip (to avoid curled thumb)
+                    dist_thumb_pinky = np.linalg.norm(thumb_tip - pinky_tip)
+                    thumb_not_near_pinky = dist_thumb_pinky > 0.15  # threshold (tune if needed)
+
+                    return thumb_straight and thumb_upward and thumb_not_near_pinky
 
                 # thumb relaxed for open palm
                 def is_thumb_open_palm():
@@ -190,25 +217,25 @@ class CameraThread(QtCore.QThread):
                 thumb_open = is_thumb_open_palm()
 
                 # --- Gesture detection ---
-                # 1) Thumbs Up
-                if thumb_up and not (idx_ext or mid_ext or ring_ext or pinky_ext):
+                # 1) Thumbs Up (thumb extended, others closed)
+                if thumb_up and not any([idx_ext, mid_ext, ring_ext, pinky_ext]):
                     gesture = "thumbs_up"
                     cv2.putText(annotated, "Thumbs Up", (10,30),
                                 cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,0), 2)
 
-                # 2) Open Palm
+                # 2) Open Palm (all extended)
                 elif thumb_open and all([idx_ext, mid_ext, ring_ext, pinky_ext]):
                     gesture = "open_palm"
                     cv2.putText(annotated, "Open Palm", (10,30),
                                 cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,255), 2)
 
-                # 3) Point
+                # 3) Point (only index extended)
                 elif idx_ext and not (mid_ext or ring_ext or pinky_ext):
                     gesture = "point"
                     cv2.putText(annotated, "Pointing", (10,30),
                                 cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255,255,0), 2)
                     
-                # 4) Peace Sign (Previous Order)
+                # 4) Peace Sign (index + middle)
                 elif idx_ext and mid_ext and not (ring_ext or pinky_ext):
                     gesture = "prev"
                     cv2.putText(annotated, "Peace Sign", (10,30),
