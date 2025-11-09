@@ -24,9 +24,8 @@ def run_api():
 
 threading.Thread(target=run_api, daemon=True).start()
 
-
-
-DB_PATH = Path("../orders.db")
+# ---------- Paths ----------
+DB_PATH = Path(__file__).resolve().parent / "orders.db"
 SOUNDS_DIR = Path("sounds")
 SOUND_FILES = {
     "thumbs_up": SOUNDS_DIR / "confirm.wav",
@@ -38,23 +37,21 @@ SOUND_FILES = {
 # ---------- Utility: generate simple beep WAVs if missing ----------
 def ensure_sounds():
     SOUNDS_DIR.mkdir(exist_ok=True)
-    # Tone settings per action: (freq_hz, duration_s)
     tones = {
-        "thumbs_up": (880, 0.10),   # high beep
-        "open_palm": (440, 0.12),   # low beep
-        "point": (660, 0.08),       # mid beep
-        "prev": (660, 0.08),        # mid beep
+        "thumbs_up": (880, 0.10),
+        "open_palm": (440, 0.12),
+        "point": (660, 0.08),
+        "prev": (660, 0.08),
     }
     framerate = 44100
     for name, (freq, dur) in tones.items():
         path = SOUND_FILES[name]
         if not path.exists():
             samples = np.sin(2 * np.pi * np.arange(int(framerate * dur)) * freq / framerate)
-            # amplitude -> int16
             samples = (samples * 0.5 * (2**15 - 1)).astype(np.int16)
             with wave.open(str(path), 'wb') as wf:
                 wf.setnchannels(1)
-                wf.setsampwidth(2)  # 2 bytes for int16
+                wf.setsampwidth(2)
                 wf.setframerate(framerate)
                 wf.writeframes(samples.tobytes())
 
@@ -70,37 +67,41 @@ def init_db(path=DB_PATH):
         created_at TEXT NOT NULL
     )
     """)
+
+    # --- Safe migration for new columns ---
+    c.execute("PRAGMA table_info(orders);")
+    cols = [r[1] for r in c.fetchall()]
+    if "items" not in cols:
+        c.execute("ALTER TABLE orders ADD COLUMN items TEXT;")
+    if "qty" not in cols:
+        c.execute("ALTER TABLE orders ADD COLUMN qty INTEGER DEFAULT 0;")
+    if "total" not in cols:
+        c.execute("ALTER TABLE orders ADD COLUMN total REAL DEFAULT 0.0;")
+
     conn.commit()
-    # seed some demo orders if empty
+
+    # --- Seed demo data if empty ---
     c.execute("SELECT COUNT(*) FROM orders")
     if c.fetchone()[0] == 0:
         now = datetime.utcnow().isoformat()
-        demos = [("1001", "pending", now),
-                 ("1002", "pending", now),
-                 ("1003", "pending", now),
-                 ("1004", "pending", now)]
-        c.executemany("INSERT INTO orders (order_number, status, created_at) VALUES (?, ?, ?)", demos)
+        demos = [
+            ("1001", "pending", now, "Burger, Fries", 2, 120.0),
+            ("1002", "pending", now, "Hotdog", 1, 45.0),
+            ("1003", "pending", now, "Pasta, Juice", 2, 90.0),
+            ("1004", "pending", now, "Coffee", 1, 30.0),
+        ]
+        c.executemany("""
+            INSERT INTO orders (order_number, status, created_at, items, qty, total)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, demos)
         conn.commit()
     conn.close()
 
 def load_orders():
     conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    # Support both old and new schemas
-    try:
-        cur.execute("""
-            SELECT id, order_number, items, quantity, total, status
-            FROM orders
-            ORDER BY id DESC
-        """)
-    except sqlite3.OperationalError:
-        # fallback for older DBs with only 3 columns
-        cur.execute("""
-            SELECT id, order_number, status
-            FROM orders
-            ORDER BY id DESC
-        """)
-    rows = cur.fetchall()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, order_number, status, items, qty, total FROM orders ORDER BY id DESC")
+    rows = cursor.fetchall()
     conn.close()
     return rows
 
@@ -120,27 +121,17 @@ def update_order_status(order_id, new_status, path=DB_PATH):
     conn.close()
 
 def get_order_by_id(order_id):
-    """
-    Returns a dictionary for the given order_id with keys:
-    number, items, qty, total, status
-    """
-    rows = load_orders()  # returns list of tuples
-    for row in rows:
-        if row[0] == order_id:
-            # safe unpacking
-            number = row[1] if len(row) > 1 else "-"
-            items = row[2] if len(row) > 2 else "-"
-            qty = row[3] if len(row) > 3 else "-"
-            total = row[4] if len(row) > 4 else 0.0
-            status = row[5] if len(row) > 5 else "pending"
-            return {
-                "number": number,
-                "items": items,
-                "qty": qty,
-                "total": total,
-                "status": status
-            }
-    return None
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, order_number, status, items, qty, total FROM orders WHERE id = ?", (order_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    cols = ["id", "order_number", "status", "items", "qty", "total"]
+    return dict(zip(cols, row))
+
+
 
 
 # ---------- Gesture detection thread (restored interface) ----------
@@ -358,16 +349,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.order_card = QtWidgets.QGroupBox("Order Details")
         card_layout = QtWidgets.QFormLayout()
         self.lbl_order_number = QtWidgets.QLabel("-")
-        self.lbl_order_items = QtWidgets.QLabel("-")
-        self.lbl_order_qty = QtWidgets.QLabel("-")
-        self.lbl_order_total = QtWidgets.QLabel("-")
         self.lbl_order_status = QtWidgets.QLabel("-")
+        self.lbl_items = QtWidgets.QLabel("-")
+        self.lbl_qty = QtWidgets.QLabel("-")
+        self.lbl_total = QtWidgets.QLabel("-")
+
         card_layout.addRow("Order #:", self.lbl_order_number)
-        card_layout.addRow("Items:", self.lbl_order_items)
-        card_layout.addRow("Qty:", self.lbl_order_qty)
-        card_layout.addRow("Total:", self.lbl_order_total)
         card_layout.addRow("Status:", self.lbl_order_status)
+        card_layout.addRow("Items:", self.lbl_items)
+        card_layout.addRow("Quantity:", self.lbl_qty)
+        card_layout.addRow("Total:", self.lbl_total)
+
         self.order_card.setLayout(card_layout)
+
         right.addWidget(self.order_card)
 
         # --- Orders Table ---
@@ -446,17 +440,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 selected_id = sel
 
         self.order_table.setRowCount(0)
-        rows = load_orders()  # return list of tuples
+        rows = load_orders()  # expected: (id, number, status, items, qty, total)
 
         for r, row in enumerate(rows):
-            # Safe unpacking
+            # Unpack safely in correct order
             id_ = row[0] if len(row) > 0 else None
             number = row[1] if len(row) > 1 else "-"
-            items = row[2] if len(row) > 2 else "-"
-            qty = row[3] if len(row) > 3 else "-"
-            total = row[4] if len(row) > 4 else 0.0
-            status = row[5] if len(row) > 5 else "pending"
+            status = row[2] if len(row) > 2 else "pending"
+            items = row[3] if len(row) > 3 else "-"
+            qty = row[4] if len(row) > 4 else "-"
+            total = row[5] if len(row) > 5 else 0.0
 
+            # Add to table
             self.order_table.insertRow(r)
 
             item_number = QtWidgets.QTableWidgetItem(str(number))
@@ -486,6 +481,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.order_table.selectRow(0)
             self.on_order_selected(0, 0)
 
+
     def get_selected_order(self):
         row = self.order_table.currentRow()
         if row < 0:
@@ -502,11 +498,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if not order:
             return
 
-        self.lbl_order_number.setText(str(order.get("number", "-")))
-        self.lbl_order_items.setText(str(order.get("items", "-")))
-        self.lbl_order_qty.setText(str(order.get("qty", "-")))
-        self.lbl_order_total.setText(f"{order.get('total', 0.0):.2f}")
+        self.lbl_order_number.setText(str(order.get("order_number", "-")))
         self.lbl_order_status.setText(order.get("status", "-"))
+        self.lbl_items.setText(order.get("items", "-"))
+        self.lbl_qty.setText(str(order.get("qty", "-")))
+        self.lbl_total.setText(f"{order.get('total', 0):.2f}")
+
 
     # ===== Handle Gesture / Button Actions =====
     def handle_action(self, gesture):
