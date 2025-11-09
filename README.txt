@@ -6,6 +6,9 @@ Description
 This is a local desktop application built with Python (PyQt6 and OpenCV) that allows managing orders
 using hand gestures via your laptop camera. Gestures are recognized using MediaPipe Hands.
 
+Latest Changes:
+    - fixed bugs where fist is detected as thumbs up
+
 Minimum Viable Product includes:
 
 Gestures:
@@ -13,6 +16,7 @@ Gestures:
     - Point right: Next order
     - Peace sign: Previous Order
     - Thumbs Up: Mark order as completed
+    - Fist: Hold or do nothing
 
 UI: 
     - Frontend
@@ -22,10 +26,10 @@ UI:
 Key Features
 ------------
 1. ** Current Gesture Controls:**
-   - 👍 Thumbs Up: Mark the selected order as completed
-   - ✋ Open Palm: Cancel the selected order
-   - 👉 Point: Move to the next order
-   - peace sign: move to the previous order
+   - Thumbs Up: Mark the selected order as completed
+   - Open Palm: Cancel the selected order
+   - Point: Move to the next order
+   - Peace sign: move to the previous order
 
 2. **UI Features:**
    - Real-time video feed with hand landmarks overlay
@@ -35,7 +39,7 @@ Key Features
    - API endpoint for mobile web app POST request
 
 3. **Debounce Mechanism:**
-   - Gestures are confirmed only after being detected consistently for 8 frames to avoid flickering.
+   - Gestures are confirmed only after being detected consistently for 12 frames to avoid flickering.
 
 System Requirements
 -------------------
@@ -85,9 +89,11 @@ python app.py
 - Gesture legend
 
 4. Perform gestures in front of the camera:
-- 👍 Thumbs Up → completes selected order
-- ✋ Open Palm → cancels selected order
-- 👉 Point → selects next order
+- Thumbs Up → completes selected order
+- Open Palm → cancels selected order
+- Point → selects next order
+- Peace Sign -> selects previous order
+- Fist -> hold/do nothing
 
 Notes
 -----
@@ -114,6 +120,6 @@ asmodeus-p (Marc Danielle Ipapo)
 
 Version
 -------
-1.0 — Local Gesture-Based Order Manager (PyQt6 + OpenCV + MediaPipe)
+1.9 — Local Gesture-Based Order Manager (PyQt6 + OpenCV + MediaPipe)
 
 
