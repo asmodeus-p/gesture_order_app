@@ -4,6 +4,7 @@ import sqlite3
 import time
 import wave
 import os
+import math
 from datetime import datetime
 from pathlib import Path
 
@@ -161,7 +162,8 @@ class CameraThread(QtCore.QThread):
                 )
 
                 # normalized landmarks
-                lm = [(l.x, l.y) for l in hand.landmark]
+                lm = [(lmk.x, lmk.y, lmk.z) for lmk in hand.landmark]
+
 
                 # fingertip and pip indices
                 tip_ids = {"thumb": 4, "index": 8, "middle": 12, "ring": 16, "pinky": 20}
@@ -173,9 +175,42 @@ class CameraThread(QtCore.QThread):
                     pip = pip_ids[finger]
                     return lm[tip][1] < lm[pip][1]  # tip above pip
 
-                # thumb vertical for thumbs up
-                def is_thumb_up():
-                    return lm[4][1] < lm[3][1]  # tip above IP joint
+                # --- Thumbs Up Detection ---
+                def is_thumbs_up(lm):
+                    """
+                    Detect thumbs-up based on:
+                    1️⃣ All non-thumb fingers closed (tip below PIP)
+                    2️⃣ Thumb points away from palm (dot product < 0)
+                    lm: list of 21 (x,y,z) landmarks from MediaPipe
+                    Returns True if thumbs-up, else False.
+                    """
+
+                    tip_ids = {"thumb": 4, "index": 8, "middle": 12, "ring": 16, "pinky": 20}
+                    pip_ids = {"index": 6, "middle": 10, "ring": 14, "pinky": 18}
+
+                    # 1️⃣ Check all non-thumb fingers closed
+                    fingers_closed = all(lm[tip_ids[f]][1] > lm[pip_ids[f]][1] for f in ["index", "middle", "ring", "pinky"])
+                    if not fingers_closed:
+                        return False
+
+                    # 2️⃣ Check thumb points away from palm
+                    wrist = np.array(lm[0][:2])
+                    thumb_tip = np.array(lm[tip_ids["thumb"]][:2])
+                    thumb_ip = np.array(lm[3][:2])
+
+                    thumb_vec = thumb_tip - thumb_ip
+
+                    # Palm vector: wrist → middle finger MCP
+                    middle_mcp = np.array(lm[9][:2])
+                    palm_vec = middle_mcp - wrist
+
+                    # Dot product: negative if thumb points away from palm
+                    dot = np.dot(thumb_vec, palm_vec)
+                    if dot >= 0:
+                        return False
+
+                    return True
+
 
                 # thumb relaxed for open palm
                 def is_thumb_open_palm():
@@ -186,33 +221,61 @@ class CameraThread(QtCore.QThread):
                 mid_ext = is_finger_extended("middle")
                 ring_ext = is_finger_extended("ring")
                 pinky_ext = is_finger_extended("pinky")
-                thumb_up = is_thumb_up()
+                thumb_up = is_thumbs_up(lm)
                 thumb_open = is_thumb_open_palm()
 
                 # --- Gesture detection ---
-                # 1) Thumbs Up
-                if thumb_up and not (idx_ext or mid_ext or ring_ext or pinky_ext):
+                def distance(a, b):
+                    return math.sqrt((a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2)
+
+                def is_fist(hand_landmarks, lm):
+                    # tip IDs for fingers (excluding thumb)
+                    finger_tips = [8, 12, 16, 20]
+                    palm_base = lm[0]  # wrist landmark
+                    closed = []
+                    for tip_id in finger_tips:
+                        dist = distance(lm[tip_id], palm_base)
+                        closed.append(dist < 0.15)  # threshold — adjust 0.15 if needed
+                    return all(closed)
+                # Helper: check if finger curled (tip below pip)
+                def is_finger_curled(finger):
+                    tip = tip_ids[finger]
+                    pip = pip_ids[finger]
+                    return lm[tip][1] > lm[pip][1]  # tip below pip = curled
+                
+                if is_fist(hand, lm):
+                    gesture = "fist"
+
+                # 1) Fist (Hold)
+                if all(is_finger_curled(f) for f in ["index", "middle", "ring", "pinky"]) and lm[4][1] > lm[3][1]:
+                    gesture = "fist"
+                    cv2.putText(annotated, "Hold (✊)", (10, 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (180, 180, 180), 2)
+                    
+                elif is_thumbs_up(lm):
                     gesture = "thumbs_up"
-                    cv2.putText(annotated, "Thumbs Up", (10,30),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,0), 2)
+                    cv2.putText(annotated, "Thumbs Up", (10, 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
 
-                # 2) Open Palm
-                elif thumb_open and all([idx_ext, mid_ext, ring_ext, pinky_ext]):
+                # 3) Open Palm
+                elif is_thumb_open_palm() and all([idx_ext, mid_ext, ring_ext, pinky_ext]):
                     gesture = "open_palm"
-                    cv2.putText(annotated, "Open Palm", (10,30),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,255), 2)
+                    cv2.putText(annotated, "Open Palm", (10, 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
 
-                # 3) Point
+                # 4) Point
                 elif idx_ext and not (mid_ext or ring_ext or pinky_ext):
                     gesture = "point"
-                    cv2.putText(annotated, "Pointing", (10,30),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255,255,0), 2)
-                    
-                # 4) Peace Sign (Previous Order)
+                    cv2.putText(annotated, "Pointing", (10, 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 0), 2)
+
+                # 5) Peace Sign (Previous Order)
                 elif idx_ext and mid_ext and not (ring_ext or pinky_ext):
                     gesture = "prev"
-                    cv2.putText(annotated, "Peace Sign", (10,30),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (200,200,0), 2)
+                    cv2.putText(annotated, "Peace Sign", (10, 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (200, 200, 0), 2)
+                    
+
 
             # --- Debounce ---
             if gesture == self.last_gesture and gesture is not None:
@@ -413,6 +476,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 action_changed = True
             else:
                 self.status_label.setText("Status: Already at first order")
+
+        elif gesture == "fist":
+            self.status_label.setText("Status: Holding (✊)")
+            return  # do nothing
 
 
         # reload while preserving selection (so selection doesn't jump)
