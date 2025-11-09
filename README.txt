@@ -7,7 +7,12 @@ This is a local desktop application built with Python (PyQt6 and OpenCV) that al
 using hand gestures via your laptop camera. Gestures are recognized using MediaPipe Hands.
 
 Latest Changes:
-    - fixed bugs where fist is detected as thumbs up
+    - fixed sqlite3 table misalignment
+    - UI Changes
+
+Next Updates:
+    v2.1 Create web app to put orders on the system (Right now you can only put orders through a POST request using postman)
+    v2.2 Customize UI to fit BagaBurger aesthetics
 
 Minimum Viable Product includes:
 
@@ -120,6 +125,6 @@ asmodeus-p (Marc Danielle Ipapo)
 
 Version
 -------
-1.9 — Local Gesture-Based Order Manager (PyQt6 + OpenCV + MediaPipe)
+2.0 — Local Gesture-Based Order Manager (PyQt6 + OpenCV + MediaPipe)
 
 
