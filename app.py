@@ -301,7 +301,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Gesture Order Manager (PyQt6)")
-        self.resize(1100, 700)
+        self.resize(1200, 720)
 
         ensure_sounds()
 
@@ -313,46 +313,83 @@ class MainWindow(QtWidgets.QMainWindow):
             se.setVolume(0.5)
             self.sounds[k] = se
 
-        # Central widget
+        # ---- Main Layout ----
         main = QtWidgets.QWidget()
         self.setCentralWidget(main)
         layout = QtWidgets.QHBoxLayout(main)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(25)
 
-        # ===== Left: Video + Gesture Buttons =====
+        # ===== Left: Video and Gestures =====
         left = QtWidgets.QVBoxLayout()
+        left.setSpacing(15)
+
         self.video_label = QtWidgets.QLabel()
         self.video_label.setFixedSize(640, 480)
-        self.video_label.setStyleSheet("background-color: black;")
-        left.addWidget(self.video_label)
+        self.video_label.setStyleSheet("""
+            background-color: #1e1e1e;
+            border-radius: 10px;
+        """)
+        left.addWidget(self.video_label, alignment=QtCore.Qt.AlignmentFlag.AlignCenter)
 
         self.status_label = QtWidgets.QLabel("Status: Ready")
+        self.status_label.setStyleSheet("font-weight: bold; font-size: 14px;")
         left.addWidget(self.status_label)
 
-        # Gesture buttons
+        # Gesture buttons row
         btn_layout = QtWidgets.QHBoxLayout()
-        self.btn_prev = QtWidgets.QPushButton("Previous (✌️)")
-        self.btn_complete = QtWidgets.QPushButton("Complete (👍)")
-        self.btn_cancel = QtWidgets.QPushButton("Cancel (✋)")
-        self.btn_next = QtWidgets.QPushButton("Next (👉)")
-        btn_layout.addWidget(self.btn_prev)
-        btn_layout.addWidget(self.btn_complete)
-        btn_layout.addWidget(self.btn_cancel)
-        btn_layout.addWidget(self.btn_next)
+        for text in ["Previous (✌️)", "Complete (👍)", "Cancel (✋)", "Next (👉)"]:
+            btn = QtWidgets.QPushButton(text)
+            btn.setMinimumHeight(40)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #4a90e2;
+                    color: white;
+                    font-weight: bold;
+                    border-radius: 8px;
+                }
+                QPushButton:hover {
+                    background-color: #357ABD;
+                }
+            """)
+            btn_layout.addWidget(btn)
+        self.btn_prev, self.btn_complete, self.btn_cancel, self.btn_next = btn_layout.itemAt(0).widget(), btn_layout.itemAt(1).widget(), btn_layout.itemAt(2).widget(), btn_layout.itemAt(3).widget()
         left.addLayout(btn_layout)
 
-        layout.addLayout(left)
+        layout.addLayout(left, 1)
 
-        # ===== Right: Orders Card + Table =====
+        # ===== Right: Orders Card and Table =====
         right = QtWidgets.QVBoxLayout()
+        right.setSpacing(15)
 
-        # --- Order Details Card ---
+        # ---- Order Details Card ----
         self.order_card = QtWidgets.QGroupBox("Order Details")
+        self.order_card.setStyleSheet("""
+            QGroupBox {
+                background-color: #f9f9f9;
+                border: 1px solid #ccc;
+                border-radius: 10px;
+                font-weight: bold;
+                padding: 12px;
+            }
+            QLabel {
+                font-size: 13px;
+            }
+        """)
         card_layout = QtWidgets.QFormLayout()
+        card_layout.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        card_layout.setFormAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
+        card_layout.setVerticalSpacing(8)
+
         self.lbl_order_number = QtWidgets.QLabel("-")
         self.lbl_order_status = QtWidgets.QLabel("-")
         self.lbl_items = QtWidgets.QLabel("-")
         self.lbl_qty = QtWidgets.QLabel("-")
         self.lbl_total = QtWidgets.QLabel("-")
+
+        # bold important info
+        for lbl in [self.lbl_order_number, self.lbl_order_status]:
+            lbl.setStyleSheet("font-weight: bold;")
 
         card_layout.addRow("Order #:", self.lbl_order_number)
         card_layout.addRow("Status:", self.lbl_order_status)
@@ -361,35 +398,46 @@ class MainWindow(QtWidgets.QMainWindow):
         card_layout.addRow("Total:", self.lbl_total)
 
         self.order_card.setLayout(card_layout)
-
         right.addWidget(self.order_card)
 
-        # --- Orders Table ---
+        # ---- Orders Table ----
         right.addWidget(QtWidgets.QLabel("<b>All Orders</b>"))
         self.order_table = QtWidgets.QTableWidget()
         self.order_table.setColumnCount(2)
-        self.order_table.setHorizontalHeaderLabels(["Order ID", "Status"])
-        self.order_table.horizontalHeader().setSectionResizeMode(
-            QtWidgets.QHeaderView.ResizeMode.Stretch
-        )
-        self.order_table.setSelectionBehavior(
-            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
-        )
-        self.order_table.setSelectionMode(
-            QtWidgets.QAbstractItemView.SelectionMode.SingleSelection
-        )
+        self.order_table.setHorizontalHeaderLabels(["Order #", "Status"])
+        self.order_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.order_table.setStyleSheet("""
+            QHeaderView::section {
+                background-color: #4a90e2;
+                color: white;
+                font-weight: bold;
+                padding: 5px;
+            }
+            QTableWidget {
+                background-color: white;
+                border: 1px solid #ccc;
+                border-radius: 8px;
+            }
+        """)
+        self.order_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.order_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.order_table.setEditTriggers(QtWidgets.QTableWidget.EditTrigger.NoEditTriggers)
-        right.addWidget(self.order_table)
+        right.addWidget(self.order_table, 1)
 
-        # Legend
+        # ---- Legend ----
         legend = QtWidgets.QLabel(
-            "Gestures:\n👍 Thumbs Up = Complete\n✋ Open Palm = Cancel\n👉 Point = Next order\n✌️ Peace = Previous order"
+            "<b>Gestures:</b><br>"
+            "👍 Complete<br>"
+            "✋ Cancel<br>"
+            "👉 Next order<br>"
+            "✌️ Previous order"
         )
+        legend.setStyleSheet("font-size: 13px; color: #444; margin-top: 5px;")
         right.addWidget(legend)
 
-        layout.addLayout(right)
+        layout.addLayout(right, 1)
 
-        # ===== Signals =====
+        # ===== Connect Buttons =====
         self.btn_complete.clicked.connect(lambda: self.handle_action("thumbs_up"))
         self.btn_cancel.clicked.connect(lambda: self.handle_action("open_palm"))
         self.btn_next.clicked.connect(lambda: self.handle_action("point"))
@@ -406,17 +454,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cam_thread.gesture_detected.connect(self.on_gesture)
         self.cam_thread.start()
 
-        # Load DB
+        # Load DB + refresh
         init_db()
         self.reload_orders()
-
-        # Table selection signal
         self.order_table.cellClicked.connect(self.on_order_selected)
 
-        # Poll timer for updates
+        # Auto refresh every few seconds
         self.poll_timer = QtCore.QTimer()
         self.poll_timer.timeout.connect(lambda: self.reload_orders(preserve_selection=True))
         self.poll_timer.start(3000)
+
 
     # ===== Helper Methods =====
     def closeEvent(self, event):
