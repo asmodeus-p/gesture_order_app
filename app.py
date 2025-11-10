@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import cv2
 import mediapipe as mp
+import json
 from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtMultimedia import QSoundEffect
 from PyQt6.QtCore import QUrl, QSettings
@@ -92,31 +93,35 @@ def init_db(path=DB_PATH):
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         order_number TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'pending',
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        items TEXT,
+        total REAL DEFAULT 0.0
     )
     """)
-    c.execute("PRAGMA table_info(orders);")
-    cols = [r[1] for r in c.fetchall()]
-    if "items" not in cols:
-        c.execute("ALTER TABLE orders ADD COLUMN items TEXT;")
-    if "qty" not in cols:
-        c.execute("ALTER TABLE orders ADD COLUMN qty INTEGER DEFAULT 0;")
-    if "total" not in cols:
-        c.execute("ALTER TABLE orders ADD COLUMN total REAL DEFAULT 0.0;")
     conn.commit()
 
     c.execute("SELECT COUNT(*) FROM orders")
     if c.fetchone()[0] == 0:
         now = datetime.utcnow().isoformat()
         demos = [
-            ("1001", "pending", now, "Burger, Fries", 2, 120.0),
-            ("1002", "pending", now, "Hotdog", 1, 45.0),
-            ("1003", "pending", now, "Pasta, Juice", 2, 90.0),
-            ("1004", "pending", now, "Coffee", 1, 30.0),
+            ("1001", "pending", now, json.dumps([
+                {"name": "Burger", "qty": 2},
+                {"name": "Fries", "qty": 1}
+            ]), 120.0),
+            ("1002", "pending", now, json.dumps([
+                {"name": "Hotdog", "qty": 1}
+            ]), 45.0),
+            ("1003", "pending", now, json.dumps([
+                {"name": "Pasta", "qty": 1},
+                {"name": "Juice", "qty": 1}
+            ]), 90.0),
+            ("1004", "pending", now, json.dumps([
+                {"name": "Coffee", "qty": 1}
+            ]), 30.0),
         ]
         c.executemany("""
-            INSERT INTO orders (order_number, status, created_at, items, qty, total)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO orders (order_number, status, created_at, items, total)
+            VALUES (?, ?, ?, ?, ?)
         """, demos)
         conn.commit()
     conn.close()
@@ -147,13 +152,19 @@ def update_order_status(order_id, new_status, path=DB_PATH):
 def get_order_by_id(order_id):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT id, order_number, status, items, qty, total FROM orders WHERE id = ?", (order_id,))
+    cursor.execute("SELECT id, order_number, status, items, total FROM orders WHERE id = ?", (order_id,))
     row = cursor.fetchone()
     conn.close()
     if not row:
         return None
-    cols = ["id", "order_number", "status", "items", "qty", "total"]
-    return dict(zip(cols, row))
+    cols = ["id", "order_number", "status", "items", "total"]
+    data = dict(zip(cols, row))
+
+    try:
+        data["items"] = json.loads(data["items"])
+    except Exception:
+        data["items"] = []
+    return data
 
 # ---------------- Camera Thread (robust) ----------------
 class CameraThread(QtCore.QThread):
@@ -634,8 +645,23 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.lbl_order_number.setText(str(order.get("order_number", "-")))
         self.lbl_order_status.setText(order.get("status", "-"))
-        self.lbl_items.setText(order.get("items", "-"))
-        self.lbl_qty.setText(str(order.get("qty", "-")))
+        items = order.get("items", [])
+        if isinstance(items, str):
+            import json
+            try:
+                items = json.loads(items)
+            except Exception:
+                items = []
+
+        if not items:
+            self.lbl_items.setText("-")
+        else:
+            lines = [f"{it['name']} — {it['qty']}x" for it in items if 'name' in it]
+            self.lbl_items.setText("\n".join(lines))
+
+        total_qty = sum(it.get("qty", 0) for it in items)
+        self.lbl_qty.setText(str(total_qty))
+
         self.lbl_total.setText(f"{order.get('total', 0):.2f}")
 
         # Color status in details card

@@ -1,16 +1,17 @@
-# api/server.py
 from fastapi import FastAPI
 from pydantic import BaseModel
+from typing import List
 import sqlite3
 from pathlib import Path
 from datetime import datetime
+import json
 
 # Use the same DB file as your PyQt app
 DB_PATH = Path(__file__).resolve().parent.parent / "orders.db"
 
 api_app = FastAPI(title="Order API")
 
-# Initialize database if needed
+# --- Database setup ---
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -19,47 +20,48 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         order_number TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'pending',
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        items TEXT,
+        total REAL DEFAULT 0.0
     )
     """)
-    # Add missing columns (safe migration)
-    c.execute("PRAGMA table_info(orders);")
-    cols = [r[1] for r in c.fetchall()]
-    if "items" not in cols:
-        c.execute("ALTER TABLE orders ADD COLUMN items TEXT;")
-    if "qty" not in cols:
-        c.execute("ALTER TABLE orders ADD COLUMN qty INTEGER DEFAULT 0;")
-    if "total" not in cols:
-        c.execute("ALTER TABLE orders ADD COLUMN total REAL DEFAULT 0.0;")
     conn.commit()
     conn.close()
 
-init_db()  # ensure schema is ready
+init_db()  # ensure schema exists
 
-# --- API models ---
+# --- Pydantic Models ---
+class Item(BaseModel):
+    name: str
+    qty: int
+
 class OrderRequest(BaseModel):
     order_number: str
-    items: list[str] = []
-    quantities: list[int] = []
+    items: List[Item]
+    total: float
 
 # --- Helper to insert order ---
-def add_order(order_number, items, quantities):
+def add_order(order_number: str, items: List[dict], total: float):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     now = datetime.utcnow().isoformat()
-    # Convert lists to text for storage
-    items_str = ", ".join(items)
-    qty = sum(quantities) if quantities else 0
-    total = 0.0  # You can compute real total later
-    c.execute(
-        "INSERT INTO orders (order_number, status, created_at, items, qty, total) VALUES (?, ?, ?, ?, ?, ?)",
-        (order_number, "pending", now, items_str, qty, total)
-    )
+
+    items_json = json.dumps(items, ensure_ascii=False)
+    total_qty = sum(i.get("qty", 0) for i in items)
+
+    c.execute("""
+        INSERT INTO orders (order_number, status, created_at, items, total)
+        VALUES (?, ?, ?, ?, ?)
+    """, (order_number, "pending", now, items_json, total))
     conn.commit()
     conn.close()
 
 # --- Routes ---
 @api_app.post("/orders/add")
 def create_order(order: OrderRequest):
-    add_order(order.order_number, order.items, order.quantities)
-    return {"status": "ok", "order_number": order.order_number}
+    add_order(order.order_number, [i.dict() for i in order.items], order.total)
+    return {
+        "status": "ok",
+        "order_number": order.order_number,
+        "items_count": len(order.items)
+    }
