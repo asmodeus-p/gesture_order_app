@@ -1,15 +1,37 @@
+# api/server.py
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List
-import sqlite3
+from typing import List, Dict
 from pathlib import Path
+import sqlite3, json
 from datetime import datetime
-import json
 
 # Use the same DB file as your PyQt app
 DB_PATH = Path(__file__).resolve().parent.parent / "orders.db"
+KIOSK_PATH = Path(__file__).resolve().parent.parent / "kiosk"
 
 api_app = FastAPI(title="Order API")
+
+# ---------------- CORS ----------------
+api_app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # replace with frontend origin in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ---------------- Serve Kiosk Web App ----------------
+api_app.mount("/assets", StaticFiles(directory=KIOSK_PATH / "assets"), name="assets")
+
+@api_app.get("/")
+def serve_kiosk():
+    """Serve the kiosk index.html for the base URL"""
+    return FileResponse(KIOSK_PATH / "index.html")
+
 
 # --- Database setup ---
 def init_db():
