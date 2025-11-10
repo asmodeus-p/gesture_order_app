@@ -7,8 +7,8 @@ This is a local desktop application built with Python (PyQt6 and OpenCV) that al
 using hand gestures via your laptop camera. Gestures are recognized using MediaPipe Hands.
 
 Latest Changes:
-    - fixed sqlite3 table misalignment
-    - UI Changes
+    - Added Camera Selection Option
+    - UI update/changes
 
 Next Updates:
     v2.1 Create web app to put orders on the system (Right now you can only put orders through a POST request using postman)
