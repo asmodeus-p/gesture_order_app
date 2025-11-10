@@ -3,7 +3,6 @@ import sys
 import sqlite3
 import time
 import wave
-import os
 from datetime import datetime
 from pathlib import Path
 
@@ -12,19 +11,49 @@ import cv2
 import mediapipe as mp
 from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtMultimedia import QSoundEffect
-from PyQt6.QtCore import QUrl
+from PyQt6.QtCore import QUrl, QSettings
 
 import threading
 import uvicorn
 from api.server import api_app
 
-# Start FastAPI in the background
+# ---------------- FastAPI background server ----------------
 def run_api():
     uvicorn.run(api_app, host="0.0.0.0", port=8000)
 
 threading.Thread(target=run_api, daemon=True).start()
 
-# ---------- Paths ----------
+# ---------------- Minimal light theme (QSS) ----------------
+APP_QSS = """
+* { font-family: 'Segoe UI', 'Inter', Arial; font-size: 13px; }
+QMainWindow { background: #f6f7fb; }
+QGroupBox {
+  background: #ffffff; border: 1px solid #e6e8ef; border-radius: 12px; margin-top: 10px; padding: 12px;
+}
+QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; color: #171a21; font-weight: 600; }
+QLabel[role="muted"] { color: #6b7280; }
+QPushButton {
+  min-height: 36px; padding: 0 14px; border-radius: 10px; border: 1px solid #e6e8ef; background: #ffffff; color: #111827;
+}
+QPushButton:hover { background: #f3f4f6; }
+QPushButton:pressed { background: #e5e7eb; }
+QPushButton[variant="primary"] { background: #2563eb; color: #ffffff; border: 1px solid #1e40af; }
+QPushButton[variant="primary"]:hover { background: #1d4ed8; }
+QPushButton[variant="danger"] { background: #ef4444; color: #ffffff; border: 1px solid #b91c1c; }
+QPushButton[variant="danger"]:hover { background: #dc2626; }
+#VideoFrame { background: #101316; border-radius: 12px; }
+QHeaderView::section {
+  background: #111827; color: #ffffff; font-weight: 600; border: none; padding: 6px 8px;
+}
+QTableWidget {
+  background: #ffffff; border: 1px solid #e6e8ef; border-radius: 12px; gridline-color: #eef0f5;
+}
+QTableWidget::item { padding: 6px 8px; }
+QTableWidget::item:selected { background: #e5edff; }
+QStatusBar { background: #ffffff; border-top: 1px solid #e6e8ef; }
+"""
+
+# ---------------- Paths / Sounds ----------------
 DB_PATH = Path(__file__).resolve().parent / "orders.db"
 SOUNDS_DIR = Path("sounds")
 SOUND_FILES = {
@@ -34,7 +63,6 @@ SOUND_FILES = {
     "prev": SOUNDS_DIR / "navigate.wav",
 }
 
-# ---------- Utility: generate simple beep WAVs if missing ----------
 def ensure_sounds():
     SOUNDS_DIR.mkdir(exist_ok=True)
     tones = {
@@ -55,7 +83,7 @@ def ensure_sounds():
                 wf.setframerate(framerate)
                 wf.writeframes(samples.tobytes())
 
-# ---------- SQLite Helpers ----------
+# ---------------- SQLite helpers ----------------
 def init_db(path=DB_PATH):
     conn = sqlite3.connect(path)
     c = conn.cursor()
@@ -67,8 +95,6 @@ def init_db(path=DB_PATH):
         created_at TEXT NOT NULL
     )
     """)
-
-    # --- Safe migration for new columns ---
     c.execute("PRAGMA table_info(orders);")
     cols = [r[1] for r in c.fetchall()]
     if "items" not in cols:
@@ -77,10 +103,8 @@ def init_db(path=DB_PATH):
         c.execute("ALTER TABLE orders ADD COLUMN qty INTEGER DEFAULT 0;")
     if "total" not in cols:
         c.execute("ALTER TABLE orders ADD COLUMN total REAL DEFAULT 0.0;")
-
     conn.commit()
 
-    # --- Seed demo data if empty ---
     c.execute("SELECT COUNT(*) FROM orders")
     if c.fetchone()[0] == 0:
         now = datetime.utcnow().isoformat()
@@ -131,16 +155,7 @@ def get_order_by_id(order_id):
     cols = ["id", "order_number", "status", "items", "qty", "total"]
     return dict(zip(cols, row))
 
-
-
-
-# ---------- Gesture detection thread (restored interface) ----------
-import cv2
-import time
-import numpy as np
-from PyQt6 import QtCore, QtGui
-import mediapipe as mp
-
+# ---------------- Camera Thread (robust) ----------------
 class CameraThread(QtCore.QThread):
     frame_ready = QtCore.pyqtSignal(QtGui.QImage)
     gesture_detected = QtCore.pyqtSignal(str)
@@ -150,162 +165,136 @@ class CameraThread(QtCore.QThread):
         self.camera_index = camera_index
         self.running = False
         self.fps = fps
-
-        # MediaPipe Hands
-        self.mp_hands = mp.solutions.hands
-        self.hands = self.mp_hands.Hands(
-            static_image_mode=False,
-            max_num_hands=1,
-            model_complexity=1,
-            min_detection_confidence=0.6,
-            min_tracking_confidence=0.6
-        )
-
-        # debounce state
+        # debounce
         self.last_gesture = None
         self.same_count = 0
-        self.FRAMES_REQUIRED = 12  # consecutive frames for confirmation
+        self.FRAMES_REQUIRED = 12
 
     def run(self):
         self.running = True
-        cap = cv2.VideoCapture(self.camera_index)
-        prev = 0
-        while self.running:
-            time_elapsed = time.time() - prev
-            if time_elapsed < 1 / self.fps:
-                time.sleep(max(0, 1/self.fps - time_elapsed))
-            prev = time.time()
+        cap = None
+        try:
+            cap = cv2.VideoCapture(self.camera_index)
+            if not cap.isOpened():
+                return
 
-            ret, frame = cap.read()
-            if not ret:
-                continue
+            prev = 0
+            # Create MediaPipe within the thread scope
+            with mp.solutions.hands.Hands(
+                static_image_mode=False,
+                max_num_hands=1,
+                model_complexity=1,
+                min_detection_confidence=0.6,
+                min_tracking_confidence=0.6
+            ) as hands:
+                while self.running:
+                    time_elapsed = time.time() - prev
+                    if time_elapsed < 1 / self.fps:
+                        time.sleep(max(0, 1/self.fps - time_elapsed))
+                    prev = time.time()
 
-            # mirror-like behavior
-            frame = cv2.flip(frame, 1)
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = self.hands.process(rgb)
+                    ret, frame = cap.read()
+                    if not ret:
+                        continue
 
-            gesture = None
-            annotated = frame.copy()
+                    frame = cv2.flip(frame, 1)
+                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    results = hands.process(rgb)
 
-            if results.multi_hand_landmarks:
-                hand = results.multi_hand_landmarks[0]
-                mp.solutions.drawing_utils.draw_landmarks(
-                    annotated, hand, mp.solutions.hands.HAND_CONNECTIONS
-                )
+                    gesture = None
+                    annotated = frame.copy()
 
-                # normalized landmarks
-                lm = [(l.x, l.y) for l in hand.landmark]
+                    if results.multi_hand_landmarks:
+                        hand = results.multi_hand_landmarks[0]
+                        mp.solutions.drawing_utils.draw_landmarks(
+                            annotated, hand, mp.solutions.hands.HAND_CONNECTIONS
+                        )
+                        lm = [(l.x, l.y) for l in hand.landmark]
 
-                # fingertip and pip indices
-                tip_ids = {"thumb": 4, "index": 8, "middle": 12, "ring": 16, "pinky": 20}
-                pip_ids = {"index": 6, "middle": 10, "ring": 14, "pinky": 18}
+                        tip_ids = {"thumb": 4, "index": 8, "middle": 12, "ring": 16, "pinky": 20}
+                        pip_ids = {"index": 6, "middle": 10, "ring": 14, "pinky": 18}
 
-                # check non-thumb finger extended (strict)
-                def is_finger_extended(finger):
-                    tip = tip_ids[finger]
-                    pip = pip_ids[finger]
-                    return lm[tip][1] < lm[pip][1]  # tip above pip
+                        def is_finger_extended(f):
+                            tip, pip = tip_ids[f], pip_ids[f]
+                            return lm[tip][1] < lm[pip][1]
 
-                # improved thumb-up detection
-                def is_thumb_up():
-                    wrist = np.array(lm[0])
-                    thumb_mcp = np.array(lm[2])
-                    thumb_ip = np.array(lm[3])
-                    thumb_tip = np.array(lm[4])
-                    pinky_tip = np.array(lm[20])   # pinky fingertip landmark
+                        def is_thumb_up():
+                            wrist = np.array(lm[0])
+                            thumb_mcp = np.array(lm[2])
+                            thumb_ip = np.array(lm[3])
+                            thumb_tip = np.array(lm[4])
+                            pinky_tip = np.array(lm[20])
+                            dist_mcp_ip = np.linalg.norm(thumb_mcp - thumb_ip)
+                            dist_ip_tip = np.linalg.norm(thumb_ip - thumb_tip)
+                            dist_mcp_tip = np.linalg.norm(thumb_mcp - thumb_tip)
+                            thumb_straight = dist_mcp_tip > 0.7 * (dist_mcp_ip + dist_ip_tip)
+                            thumb_upward = thumb_tip[1] < wrist[1] - 0.05
+                            thumb_not_near_pinky = np.linalg.norm(thumb_tip - pinky_tip) > 0.15
+                            return thumb_straight and thumb_upward and thumb_not_near_pinky
 
-                    # Distances between thumb joints
-                    dist_mcp_ip = np.linalg.norm(thumb_mcp - thumb_ip)
-                    dist_ip_tip = np.linalg.norm(thumb_ip - thumb_tip)
-                    dist_mcp_tip = np.linalg.norm(thumb_mcp - thumb_tip)
+                        def is_thumb_open_palm():
+                            return lm[4][0] - lm[2][0] > -0.05
 
-                    # Check if thumb is straight (not curled)
-                    thumb_straight = dist_mcp_tip > 0.7 * (dist_mcp_ip + dist_ip_tip)
+                        idx_ext = is_finger_extended("index")
+                        mid_ext = is_finger_extended("middle")
+                        ring_ext = is_finger_extended("ring")
+                        pinky_ext = is_finger_extended("pinky")
+                        thumb_up = is_thumb_up()
+                        thumb_open = is_thumb_open_palm()
 
-                    # Check thumb upward direction
-                    thumb_upward = thumb_tip[1] < wrist[1] - 0.05
+                        if thumb_up and not any([idx_ext, mid_ext, ring_ext, pinky_ext]):
+                            gesture = "thumbs_up"
+                            cv2.putText(annotated, "Thumbs Up", (10,30),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,0), 2)
+                        elif thumb_open and all([idx_ext, mid_ext, ring_ext, pinky_ext]):
+                            gesture = "open_palm"
+                            cv2.putText(annotated, "Open Palm", (10,30),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,255), 2)
+                        elif idx_ext and not (mid_ext or ring_ext or pinky_ext):
+                            gesture = "point"
+                            cv2.putText(annotated, "Pointing", (10,30),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255,255,0), 2)
+                        elif idx_ext and mid_ext and not (ring_ext or pinky_ext):
+                            gesture = "prev"
+                            cv2.putText(annotated, "Peace Sign", (10,30),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (200,200,0), 2)
 
-                    # New check: thumb should NOT be close to pinky tip (to avoid curled thumb)
-                    dist_thumb_pinky = np.linalg.norm(thumb_tip - pinky_tip)
-                    thumb_not_near_pinky = dist_thumb_pinky > 0.15  # threshold (tune if needed)
+                    # Debounce
+                    if gesture == self.last_gesture and gesture is not None:
+                        self.same_count += 1
+                    else:
+                        self.same_count = 1 if gesture is not None else 0
+                        self.last_gesture = gesture
 
-                    return thumb_straight and thumb_upward and thumb_not_near_pinky
+                    if gesture and self.same_count >= self.FRAMES_REQUIRED:
+                        self.gesture_detected.emit(gesture)
+                        self.last_gesture = None
+                        self.same_count = 0
 
-                # thumb relaxed for open palm
-                def is_thumb_open_palm():
-                    return lm[4][0] - lm[2][0] > -0.05  # allow outward angle
-
-                # check fingers
-                idx_ext = is_finger_extended("index")
-                mid_ext = is_finger_extended("middle")
-                ring_ext = is_finger_extended("ring")
-                pinky_ext = is_finger_extended("pinky")
-                thumb_up = is_thumb_up()
-                thumb_open = is_thumb_open_palm()
-
-                # --- Gesture detection ---
-                # 1) Thumbs Up (thumb extended, others closed)
-                if thumb_up and not any([idx_ext, mid_ext, ring_ext, pinky_ext]):
-                    gesture = "thumbs_up"
-                    cv2.putText(annotated, "Thumbs Up", (10,30),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,0), 2)
-
-                # 2) Open Palm (all extended)
-                elif thumb_open and all([idx_ext, mid_ext, ring_ext, pinky_ext]):
-                    gesture = "open_palm"
-                    cv2.putText(annotated, "Open Palm", (10,30),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,255), 2)
-
-                # 3) Point (only index extended)
-                elif idx_ext and not (mid_ext or ring_ext or pinky_ext):
-                    gesture = "point"
-                    cv2.putText(annotated, "Pointing", (10,30),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255,255,0), 2)
-                    
-                # 4) Peace Sign (index + middle)
-                elif idx_ext and mid_ext and not (ring_ext or pinky_ext):
-                    gesture = "prev"
-                    cv2.putText(annotated, "Peace Sign", (10,30),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (200,200,0), 2)
-
-            # --- Debounce ---
-            if gesture == self.last_gesture and gesture is not None:
-                self.same_count += 1
-            else:
-                self.same_count = 1 if gesture is not None else 0
-                self.last_gesture = gesture
-
-            if gesture and self.same_count >= self.FRAMES_REQUIRED:
-                self.gesture_detected.emit(gesture)
-                self.last_gesture = None
-                self.same_count = 0
-
-            # --- Convert frame to QImage ---
-            h, w, ch = annotated.shape
-            bytes_per_line = ch * w
-            qimg = QtGui.QImage(annotated.data, w, h, bytes_per_line,
-                                QtGui.QImage.Format.Format_BGR888)
-            self.frame_ready.emit(qimg)
-
-        cap.release()
-        self.hands.close()
+                    # Send frame
+                    h, w, ch = annotated.shape
+                    qimg = QtGui.QImage(annotated.data, w, h, ch * w, QtGui.QImage.Format.Format_BGR888)
+                    self.frame_ready.emit(qimg)
+        finally:
+            if cap is not None:
+                cap.release()
 
     def stop(self):
         self.running = False
-        self.wait()
+        self.wait(1000)
 
-
-# ---------- Main Application ----------
+# ---------------- Main Window ----------------
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Gesture Order Manager (PyQt6)")
         self.resize(1200, 720)
-
         ensure_sounds()
 
-        # Load sound effects
+        # App stylesheet
+        self.setStyleSheet(APP_QSS)
+
+        # sounds
         self.sounds = {}
         for k, p in SOUND_FILES.items():
             se = QSoundEffect()
@@ -313,73 +302,65 @@ class MainWindow(QtWidgets.QMainWindow):
             se.setVolume(0.5)
             self.sounds[k] = se
 
-        # ---- Main Layout ----
+        # central widget
         main = QtWidgets.QWidget()
         self.setCentralWidget(main)
-        layout = QtWidgets.QHBoxLayout(main)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(25)
 
-        # ===== Left: Video and Gestures =====
+        # ===== Left Panel =====
         left = QtWidgets.QVBoxLayout()
         left.setSpacing(15)
 
+        # camera badge
+        cam_bar = QtWidgets.QHBoxLayout()
+        self.lbl_camera_badge = QtWidgets.QLabel("Camera: selecting…")
+        self.lbl_camera_badge.setProperty("role", "muted")
+        self.lbl_camera_badge.setStyleSheet("color:#666; font-size:12px;")
+        cam_bar.addWidget(self.lbl_camera_badge)
+        cam_bar.addStretch(1)
+        left.addLayout(cam_bar)
+
+        # video
         self.video_label = QtWidgets.QLabel()
+        self.video_label.setObjectName("VideoFrame")
         self.video_label.setFixedSize(640, 480)
-        self.video_label.setStyleSheet("""
-            background-color: #1e1e1e;
-            border-radius: 10px;
-        """)
         left.addWidget(self.video_label, alignment=QtCore.Qt.AlignmentFlag.AlignCenter)
 
-        self.status_label = QtWidgets.QLabel("Status: Ready")
-        self.status_label.setStyleSheet("font-weight: bold; font-size: 14px;")
-        left.addWidget(self.status_label)
+        # helper hint
+        hint = QtWidgets.QLabel("Use gestures or the command bar.", parent=self)
+        hint.setProperty("role", "muted")
+        left.addWidget(hint)
 
-        # Gesture buttons row
-        btn_layout = QtWidgets.QHBoxLayout()
-        for text in ["Previous (✌️)", "Complete (👍)", "Cancel (✋)", "Next (👉)"]:
-            btn = QtWidgets.QPushButton(text)
-            btn.setMinimumHeight(40)
-            btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #4a90e2;
-                    color: white;
-                    font-weight: bold;
-                    border-radius: 8px;
-                }
-                QPushButton:hover {
-                    background-color: #357ABD;
-                }
-            """)
-            btn_layout.addWidget(btn)
-        self.btn_prev, self.btn_complete, self.btn_cancel, self.btn_next = btn_layout.itemAt(0).widget(), btn_layout.itemAt(1).widget(), btn_layout.itemAt(2).widget(), btn_layout.itemAt(3).widget()
-        left.addLayout(btn_layout)
+        # Command Bar (compact)
+        cmd = QtWidgets.QHBoxLayout()
+        cmd.setSpacing(8)
 
-        layout.addLayout(left, 1)
+        self.btn_prev   = QtWidgets.QPushButton("✌️ Prev")
+        self.btn_next   = QtWidgets.QPushButton("👉 Next")
+        self.btn_cancel = QtWidgets.QPushButton("✋ Cancel")
+        self.btn_complete = QtWidgets.QPushButton("👍 Complete")
 
-        # ===== Right: Orders Card and Table =====
+        self.btn_complete.setProperty("variant", "primary")
+        self.btn_cancel.setProperty("variant", "danger")
+
+        for b in (self.btn_prev, self.btn_next, self.btn_cancel, self.btn_complete):
+            b.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+            cmd.addWidget(b)
+        left.addLayout(cmd)
+
+        # ===== Right Panel =====
         right = QtWidgets.QVBoxLayout()
         right.setSpacing(15)
 
-        # ---- Order Details Card ----
+        # Order Details card
         self.order_card = QtWidgets.QGroupBox("Order Details")
         self.order_card.setStyleSheet("""
-            QGroupBox {
-                background-color: #f9f9f9;
-                border: 1px solid #ccc;
-                border-radius: 10px;
-                font-weight: bold;
-                padding: 12px;
-            }
-            QLabel {
-                font-size: 13px;
-            }
+            QGroupBox { background:#ffffff; border:1px solid #e6e8ef; border-radius:12px; font-weight:bold; padding:12px; }
+            QLabel { font-size:13px; }
         """)
-        card_layout = QtWidgets.QFormLayout()
-        card_layout.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
-        card_layout.setFormAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
-        card_layout.setVerticalSpacing(8)
+        card = QtWidgets.QFormLayout()
+        card.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        card.setFormAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
+        card.setVerticalSpacing(8)
 
         self.lbl_order_number = QtWidgets.QLabel("-")
         self.lbl_order_status = QtWidgets.QLabel("-")
@@ -388,54 +369,61 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_total = QtWidgets.QLabel("-")
 
         # bold important info
-        for lbl in [self.lbl_order_number, self.lbl_order_status]:
-            lbl.setStyleSheet("font-weight: bold;")
+        self.lbl_order_number.setStyleSheet("font-weight:700;")
+        self.lbl_order_status.setStyleSheet("font-weight:700;")
 
-        card_layout.addRow("Order #:", self.lbl_order_number)
-        card_layout.addRow("Status:", self.lbl_order_status)
-        card_layout.addRow("Items:", self.lbl_items)
-        card_layout.addRow("Quantity:", self.lbl_qty)
-        card_layout.addRow("Total:", self.lbl_total)
-
-        self.order_card.setLayout(card_layout)
+        card.addRow("Order #:", self.lbl_order_number)
+        card.addRow("Status:", self.lbl_order_status)
+        card.addRow("Items:", self.lbl_items)
+        card.addRow("Quantity:", self.lbl_qty)
+        card.addRow("Total:", self.lbl_total)
+        self.order_card.setLayout(card)
         right.addWidget(self.order_card)
 
-        # ---- Orders Table ----
+        # Orders table
+       # ---- Orders Table ----
         right.addWidget(QtWidgets.QLabel("<b>All Orders</b>"))
+
         self.order_table = QtWidgets.QTableWidget()
         self.order_table.setColumnCount(2)
         self.order_table.setHorizontalHeaderLabels(["Order #", "Status"])
-        self.order_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
+
+        # Per-column sizing: Order # stretches, Status fits its text
+        header = self.order_table.horizontalHeader()
+        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)            # Order #
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)  # Status
+
+        # Look & behavior
         self.order_table.setStyleSheet("""
-            QHeaderView::section {
-                background-color: #4a90e2;
-                color: white;
-                font-weight: bold;
-                padding: 5px;
-            }
-            QTableWidget {
-                background-color: white;
-                border: 1px solid #ccc;
-                border-radius: 8px;
-            }
+            QHeaderView::section { background:#111827; color:white; font-weight:bold; padding:6px 8px; }
+            QTableWidget { background:white; border:1px solid #e6e8ef; border-radius:12px; }
         """)
+        self.order_table.setAlternatingRowColors(True)
+        self.order_table.setShowGrid(False)
+        self.order_table.verticalHeader().setVisible(False)
         self.order_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.order_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.order_table.setEditTriggers(QtWidgets.QTableWidget.EditTrigger.NoEditTriggers)
         right.addWidget(self.order_table, 1)
 
-        # ---- Legend ----
-        legend = QtWidgets.QLabel(
-            "<b>Gestures:</b><br>"
-            "👍 Complete<br>"
-            "✋ Cancel<br>"
-            "👉 Next order<br>"
-            "✌️ Previous order"
-        )
-        legend.setStyleSheet("font-size: 13px; color: #444; margin-top: 5px;")
-        right.addWidget(legend)
 
-        layout.addLayout(right, 1)
+        # ===== Build splitter (after left & right are defined) =====
+        left_container = QtWidgets.QWidget()
+        left_container.setLayout(left)
+        right_container = QtWidgets.QWidget()
+        right_container.setLayout(right)
+
+        split = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        split.setChildrenCollapsible(False)
+        split.setHandleWidth(6)
+        split.addWidget(left_container)
+        split.addWidget(right_container)
+        split.setSizes([700, 500])
+
+        outer = QtWidgets.QVBoxLayout(main)
+        outer.setContentsMargins(20, 20, 20, 20)
+        outer.setSpacing(12)
+        outer.addWidget(split, 1)
 
         # ===== Connect Buttons =====
         self.btn_complete.clicked.connect(lambda: self.handle_action("thumbs_up"))
@@ -443,32 +431,142 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_next.clicked.connect(lambda: self.handle_action("point"))
         self.btn_prev.clicked.connect(lambda: self.handle_action("prev"))
 
-        # Keyboard shortcuts
+        # Shortcuts
         QtGui.QShortcut(QtGui.QKeySequence("Space"), self, activated=lambda: self.handle_action("thumbs_up"))
         QtGui.QShortcut(QtGui.QKeySequence("N"), self, activated=lambda: self.handle_action("point"))
         QtGui.QShortcut(QtGui.QKeySequence("C"), self, activated=lambda: self.handle_action("open_palm"))
 
-        # Camera thread
-        self.cam_thread = CameraThread()
-        self.cam_thread.frame_ready.connect(self.update_frame)
-        self.cam_thread.gesture_detected.connect(self.on_gesture)
-        self.cam_thread.start()
+        # Status bar
+        self.setStatusBar(QtWidgets.QStatusBar())
+        self.statusBar().showMessage("Ready")
 
-        # Load DB + refresh
+        # Camera menu + persistence
+        self.settings = QSettings("BurgerFlow", "GestureOrderManager")
+        self.available_cameras = []
+        self.build_camera_menu()
+        self.refresh_camera_list()
+
+        remembered_idx = self.settings.value("camera_index", None, type=int)
+        start_idx = None
+        if remembered_idx is not None and any(ci == remembered_idx for ci, _ in self.available_cameras):
+            start_idx = remembered_idx
+        elif self.available_cameras:
+            start_idx = self.available_cameras[0][0]
+        if start_idx is None:
+            start_idx = 0
+
+        self.start_camera_thread(start_idx)
+        self.mark_selected_camera_in_menu(start_idx)
+
+        # DB + timers
         init_db()
         self.reload_orders()
         self.order_table.cellClicked.connect(self.on_order_selected)
-
-        # Auto refresh every few seconds
         self.poll_timer = QtCore.QTimer()
         self.poll_timer.timeout.connect(lambda: self.reload_orders(preserve_selection=True))
         self.poll_timer.start(3000)
 
+    # ---------- Camera menu ----------
+    def build_camera_menu(self):
+        menubar = self.menuBar()
+        self.camera_menu = menubar.addMenu("Camera")
+        self.select_camera_menu = self.camera_menu.addMenu("Select Camera")
 
-    # ===== Helper Methods =====
+        act_refresh = QtGui.QAction("Refresh List", self)
+        act_refresh.triggered.connect(self.refresh_camera_list)
+        self.camera_menu.addAction(act_refresh)
+
+        self.camera_menu.addSeparator()
+        self.current_cam_label = QtGui.QAction("Current: (none)", self)
+        self.current_cam_label.setEnabled(False)
+        self.camera_menu.addAction(self.current_cam_label)
+
+    def enumerate_cameras(self, max_devices=10):
+        cams = []
+        for i in range(max_devices):
+            cap = cv2.VideoCapture(i)
+            ok = cap.isOpened()
+            if ok:
+                ok, _ = cap.read()
+            cap.release()
+            if ok:
+                cams.append((i, f"Camera {i}"))
+        if not cams:
+            cams.append((0, "Camera 0 (fallback)"))
+        return cams
+
+    def populate_camera_select_menu(self):
+        self.select_camera_menu.clear()
+        self.camera_action_group = QtGui.QActionGroup(self)
+        self.camera_action_group.setExclusive(True)
+        for idx, label in self.available_cameras:
+            act = QtGui.QAction(label, self, checkable=True)
+            act.setData(idx)
+            act.triggered.connect(lambda checked, cam_idx=idx: self.switch_camera(cam_idx))
+            self.camera_action_group.addAction(act)
+            self.select_camera_menu.addAction(act)
+
+    def refresh_camera_list(self, max_devices=10):
+        self.available_cameras = self.enumerate_cameras(max_devices)
+        self.populate_camera_select_menu()
+
+    def mark_selected_camera_in_menu(self, camera_index):
+        for act in self.camera_action_group.actions():
+            act.setChecked(act.data() == camera_index)
+        self.current_cam_label.setText(f"Current: Camera {camera_index}")
+        if hasattr(self, "lbl_camera_badge"):
+            self.lbl_camera_badge.setText(f"Camera: {camera_index}")
+
+    def _validate_camera(self, index):
+        cap = cv2.VideoCapture(index)
+        ok = cap.isOpened()
+        if ok:
+            ok, _ = cap.read()
+        cap.release()
+        return bool(ok)
+
+    def start_camera_thread(self, camera_index):
+        # stop & delete existing
+        if hasattr(self, "cam_thread") and self.cam_thread is not None:
+            if self.cam_thread.isRunning():
+                self.cam_thread.stop()
+            try:
+                self.cam_thread.frame_ready.disconnect(self.update_frame)
+                self.cam_thread.gesture_detected.disconnect(self.on_gesture)
+            except Exception:
+                pass
+            self.cam_thread.deleteLater()
+            self.cam_thread = None
+            QtWidgets.QApplication.processEvents()
+
+        # start new
+        self.cam_thread = CameraThread(camera_index=camera_index)
+        self.cam_thread.frame_ready.connect(self.update_frame)
+        self.cam_thread.gesture_detected.connect(self.on_gesture)
+        self.cam_thread.finished.connect(self.cam_thread.deleteLater)
+        self.cam_thread.start()
+
+    def switch_camera(self, camera_index):
+        if not self._validate_camera(camera_index):
+            QtWidgets.QMessageBox.warning(
+                self, "Camera Error",
+                f"Could not open Camera {camera_index}. It may be in use or unavailable."
+            )
+            if hasattr(self, "cam_thread") and self.cam_thread is not None:
+                current_idx = getattr(self.cam_thread, "camera_index", 0)
+                self.mark_selected_camera_in_menu(current_idx)
+            return
+
+        self.start_camera_thread(camera_index)
+        self.mark_selected_camera_in_menu(camera_index)
+        self.settings.setValue("camera_index", int(camera_index))
+        self.statusBar().showMessage(f"Switched to Camera {camera_index}")
+
+    # ---------- App helpers ----------
     def closeEvent(self, event):
-        if hasattr(self, "cam_thread") and self.cam_thread.isRunning():
+        if hasattr(self, "cam_thread") and self.cam_thread is not None and self.cam_thread.isRunning():
             self.cam_thread.stop()
+        self.cam_thread = None
         event.accept()
 
     def update_frame(self, qimg):
@@ -477,9 +575,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.video_label.setPixmap(pix)
 
-    # ===== Order Reload =====
     def reload_orders(self, preserve_selection=True):
-        # remember selected
         selected_id = None
         if preserve_selection:
             sel = self.get_selected_order()
@@ -487,36 +583,30 @@ class MainWindow(QtWidgets.QMainWindow):
                 selected_id = sel
 
         self.order_table.setRowCount(0)
-        rows = load_orders()  # expected: (id, number, status, items, qty, total)
+        rows = load_orders()
 
         for r, row in enumerate(rows):
-            # Unpack safely in correct order
             id_ = row[0] if len(row) > 0 else None
             number = row[1] if len(row) > 1 else "-"
             status = row[2] if len(row) > 2 else "pending"
-            items = row[3] if len(row) > 3 else "-"
-            qty = row[4] if len(row) > 4 else "-"
-            total = row[5] if len(row) > 5 else 0.0
 
-            # Add to table
             self.order_table.insertRow(r)
-
             item_number = QtWidgets.QTableWidgetItem(str(number))
             item_number.setData(QtCore.Qt.ItemDataRole.UserRole, id_)
             status_item = QtWidgets.QTableWidgetItem(status)
-
-            # Color by status
             if status == "completed":
-                status_item.setForeground(QtGui.QColor("green"))
+                status_item.setForeground(QtGui.QColor("#16a34a"))
             elif status == "canceled":
-                status_item.setForeground(QtGui.QColor("red"))
+                status_item.setForeground(QtGui.QColor("#ef4444"))
             else:
-                status_item.setForeground(QtGui.QColor("black"))
+                status_item.setForeground(QtGui.QColor("#111827"))
+            item_number.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignLeft)
+            status_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignHCenter)
+
 
             self.order_table.setItem(r, 0, item_number)
             self.order_table.setItem(r, 1, status_item)
 
-        # restore selection
         if preserve_selection and selected_id:
             for i in range(self.order_table.rowCount()):
                 item = self.order_table.item(i, 0)
@@ -528,7 +618,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.order_table.selectRow(0)
             self.on_order_selected(0, 0)
 
-
     def get_selected_order(self):
         row = self.order_table.currentRow()
         if row < 0:
@@ -538,25 +627,26 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         return item.data(QtCore.Qt.ItemDataRole.UserRole)
 
-    # ===== Update Order Details Card =====
     def on_order_selected(self, row, column):
         order_id = self.order_table.item(row, 0).data(QtCore.Qt.ItemDataRole.UserRole)
         order = get_order_by_id(order_id)
         if not order:
             return
-
         self.lbl_order_number.setText(str(order.get("order_number", "-")))
         self.lbl_order_status.setText(order.get("status", "-"))
         self.lbl_items.setText(order.get("items", "-"))
         self.lbl_qty.setText(str(order.get("qty", "-")))
         self.lbl_total.setText(f"{order.get('total', 0):.2f}")
 
+        # Color status in details card
+        status = order.get("status", "-")
+        color = "#16a34a" if status == "completed" else ("#ef4444" if status == "canceled" else "#111827")
+        self.lbl_order_status.setStyleSheet(f"font-weight:700; color:{color};")
 
-    # ===== Handle Gesture / Button Actions =====
     def handle_action(self, gesture):
         order_id = self.get_selected_order()
         if not order_id:
-            self.status_label.setText("Status: No order selected")
+            self.statusBar().showMessage("No order selected")
             return
 
         prior_status = get_order_status(order_id)
@@ -565,26 +655,29 @@ class MainWindow(QtWidgets.QMainWindow):
         if gesture == "thumbs_up":
             if prior_status != "completed":
                 update_order_status(order_id, "completed")
-                self.status_label.setText(f"Status: Order {order_id} completed")
+                self.statusBar().showMessage(f"Order {order_id} completed")
                 action_changed = True
+
         elif gesture == "open_palm":
             if prior_status != "canceled":
                 update_order_status(order_id, "canceled")
-                self.status_label.setText(f"Status: Order {order_id} canceled")
+                self.statusBar().showMessage(f"Order {order_id} canceled")
                 action_changed = True
+
         elif gesture == "point":
             row = self.order_table.currentRow()
             if row < self.order_table.rowCount() - 1:
                 self.order_table.selectRow(row + 1)
                 self.on_order_selected(row + 1, 0)
-                self.status_label.setText("Status: Moved to next order")
+                self.statusBar().showMessage("Moved to next order")
                 action_changed = True
+
         elif gesture == "prev":
             row = self.order_table.currentRow()
             if row > 0:
                 self.order_table.selectRow(row - 1)
                 self.on_order_selected(row - 1, 0)
-                self.status_label.setText("Status: Moved to previous order")
+                self.statusBar().showMessage("Moved to previous order")
                 action_changed = True
 
         self.reload_orders(preserve_selection=True)
@@ -593,16 +686,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self.sounds[gesture].stop()
             self.sounds[gesture].play()
 
-    # ===== Camera Gesture Slot =====
     @QtCore.pyqtSlot(str)
     def on_gesture(self, gesture):
-        self.status_label.setText(f"Gesture detected: {gesture}")
-        QtCore.QTimer.singleShot(1200, lambda: self.status_label.setText("Status: Ready"))
+        self.statusBar().showMessage(f"Gesture detected: {gesture}")
+        QtCore.QTimer.singleShot(1200, lambda: self.statusBar().showMessage("Ready"))
         self.handle_action(gesture)
 
-
+# ---------------- entry ----------------
 def main():
     app = QtWidgets.QApplication(sys.argv)
+    app.setStyleSheet(APP_QSS)
     w = MainWindow()
     w.show()
     sys.exit(app.exec())
