@@ -594,9 +594,9 @@ class MainWindow(QtWidgets.QMainWindow):
             item_number = QtWidgets.QTableWidgetItem(str(number))
             item_number.setData(QtCore.Qt.ItemDataRole.UserRole, id_)
             status_item = QtWidgets.QTableWidgetItem(status)
-            if status == "completed":
+            if status == "Completed":
                 status_item.setForeground(QtGui.QColor("#16a34a"))
-            elif status == "canceled":
+            elif status == "Cancelled":
                 status_item.setForeground(QtGui.QColor("#ef4444"))
             else:
                 status_item.setForeground(QtGui.QColor("#111827"))
@@ -640,7 +640,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Color status in details card
         status = order.get("status", "-")
-        color = "#16a34a" if status == "completed" else ("#ef4444" if status == "canceled" else "#111827")
+        color = "#16a34a" if status == "Completed" else ("#ef4444" if status == "Cancelled" else "#111827")
         self.lbl_order_status.setStyleSheet(f"font-weight:700; color:{color};")
 
     def handle_action(self, gesture):
@@ -653,15 +653,15 @@ class MainWindow(QtWidgets.QMainWindow):
         action_changed = False
 
         if gesture == "thumbs_up":
-            if prior_status != "completed":
-                update_order_status(order_id, "completed")
-                self.statusBar().showMessage(f"Order {order_id} completed")
+            if prior_status != "Completed":
+                update_order_status(order_id, "Completed")
+                self.statusBar().showMessage(f"Order {order_id} Completed")
                 action_changed = True
 
         elif gesture == "open_palm":
-            if prior_status != "canceled":
-                update_order_status(order_id, "canceled")
-                self.statusBar().showMessage(f"Order {order_id} canceled")
+            if prior_status != "Cancelled":
+                update_order_status(order_id, "Cancelled")
+                self.statusBar().showMessage(f"Order {order_id} Cancelled")
                 action_changed = True
 
         elif gesture == "point":
